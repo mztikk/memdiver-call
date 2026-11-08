@@ -31,6 +31,8 @@ mod error;
 mod debug;
 #[cfg(any(target_os = "linux", test))]
 mod frame;
+#[cfg(any(target_os = "linux", test))]
+mod frame_x86;
 #[cfg(any(windows, test))]
 mod stub;
 
@@ -38,6 +40,8 @@ mod stub;
 mod linux;
 #[cfg(windows)]
 mod windows;
+#[cfg(target_os = "linux")]
+pub mod wine32;
 
 pub use error::{CallOutcome, CallStatus, OsFailure, SysError};
 

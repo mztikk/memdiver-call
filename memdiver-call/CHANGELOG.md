@@ -21,8 +21,13 @@ All notable changes to `memdiver-call` are documented here. The format follows
   result allocations, W^X protection transitions, `CreateRemoteThread`, thread
   exit-code and completion-flag checks, CFG-friendly direct calls when in range,
   and leak reporting when the thread cannot be proven stopped.
+- Native Linux `x86_64` → 32-bit Windows PE under Wine:
+  `RemoteCaller::open_wine`/`new_wine`, a native `ptrace` backend in 32-bit
+  compatibility mode, the Windows `x86` calling conventions, `EDX:EAX`
+  results, and hardware-breakpoint safe points (`with_safe_point`,
+  `with_safe_point_timeout`, `Error::SafePointTimeout`).
 - `CallAbi` (`Auto`, `Cdecl`, `Stdcall`, `Thiscall`, `Fastcall`) and
-  `CallOptions` with ABI and Linux main-thread selection.
+  `CallOptions` with ABI, Linux main-thread selection, and Wine safe points.
 - Structured `Error` with `Open`, `ReadOnly`, `TargetExited`, `Unsupported`,
   `InvalidAddress`, `InvalidArgument`, `Platform`, `Memory`,
   `ExportNotFound`, `CallFailed`, `Cleanup`, `Leaked`, and `Poisoned`.
@@ -42,5 +47,9 @@ All notable changes to `memdiver-call` are documented here. The format follows
 - No ARM64, Linux `x86`, cross-bitness, or WOW64 support.
 - No floating-point/SIMD/struct/variadic arguments and no general remote
   allocation.
+- Native-Linux-to-Wine calls support only 32-bit arguments, not `call_export`
+  (PE exports are unavailable to `memdiver` on Linux), and only the main
+  thread; a safe point is required whenever the thread is not stopped in
+  32-bit code.
 - Native Windows CFG/CET behaviour is not verified by this release's local
   tests; native Windows CI is configured for it.

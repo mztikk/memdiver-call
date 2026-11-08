@@ -1,10 +1,18 @@
 //! Options for a remote call.
 
+use std::time::Duration;
+
+use memdiver::Address;
+
+/// Default bound on the safe-point wait.
+pub(crate) const DEFAULT_SAFE_POINT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A calling convention for a remote function.
 ///
 /// On `x86_64` only [`CallAbi::Auto`] is valid; every other variant is
-/// rejected with [`crate::Error::Unsupported`]. On Windows `x86`, `Auto` means
-/// `cdecl`.
+/// rejected with [`crate::Error::Unsupported`]. On Windows `x86` and on a
+/// 32-bit Windows target under Wine, `Auto` means `cdecl` and the other
+/// conventions are available.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CallAbi {
@@ -25,15 +33,18 @@ pub enum CallAbi {
 /// Options for a remote call.
 ///
 /// The struct is non-exhaustive; use the builder methods to change it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CallOptions {
     abi: CallAbi,
     thread: Option<u32>,
+    safe_point: Option<Address>,
+    safe_point_timeout: Duration,
 }
 
 impl CallOptions {
-    /// Creates options with the platform default ABI and no thread override.
+    /// Creates options with the platform default ABI, no thread override, and
+    /// no safe point.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -58,6 +69,34 @@ impl CallOptions {
         self
     }
 
+    /// Sets a safe point for a Wine `x86` target.
+    ///
+    /// A safe point is an instruction address in 32-bit PE code that the
+    /// target's main thread reaches regularly, for example the instruction
+    /// after `SwapBuffers` returns or a per-frame tick entry. The backend
+    /// resumes the thread until a hardware breakpoint at this address fires,
+    /// then performs the call; the same breakpoint catches the return.
+    ///
+    /// Without a safe point, a Wine `x86` call is only attempted when the
+    /// thread happens to be stopped in 32-bit mode; a thread stopped in 64-bit
+    /// Wine code returns [`crate::Error::Unsupported`]. Safe points are not
+    /// accepted by the native-target backends.
+    #[must_use]
+    pub fn with_safe_point(mut self, address: Address) -> Self {
+        self.safe_point = Some(address);
+        self
+    }
+
+    /// Sets how long to wait for the safe point to be reached.
+    ///
+    /// The default is five seconds. This bound applies only to the wait for
+    /// the safe point; the call itself has no timeout.
+    #[must_use]
+    pub fn with_safe_point_timeout(mut self, timeout: Duration) -> Self {
+        self.safe_point_timeout = timeout;
+        self
+    }
+
     /// Returns the selected calling convention.
     #[must_use]
     pub fn abi(&self) -> CallAbi {
@@ -68,6 +107,29 @@ impl CallOptions {
     #[must_use]
     pub fn thread(&self) -> Option<u32> {
         self.thread
+    }
+
+    /// Returns the selected safe point, if any.
+    #[must_use]
+    pub fn safe_point(&self) -> Option<Address> {
+        self.safe_point
+    }
+
+    /// Returns how long the safe-point wait may take.
+    #[must_use]
+    pub fn safe_point_timeout(&self) -> Duration {
+        self.safe_point_timeout
+    }
+}
+
+impl Default for CallOptions {
+    fn default() -> Self {
+        Self {
+            abi: CallAbi::Auto,
+            thread: None,
+            safe_point: None,
+            safe_point_timeout: DEFAULT_SAFE_POINT_TIMEOUT,
+        }
     }
 }
 
@@ -80,6 +142,8 @@ mod tests {
         let options = CallOptions::new();
         assert_eq!(options.abi(), CallAbi::Auto);
         assert_eq!(options.thread(), None);
+        assert_eq!(options.safe_point(), None);
+        assert_eq!(options.safe_point_timeout(), DEFAULT_SAFE_POINT_TIMEOUT);
         assert_eq!(CallAbi::default(), CallAbi::Auto);
     }
 
@@ -89,5 +153,14 @@ mod tests {
         assert_eq!(options.abi(), CallAbi::Stdcall);
         assert_eq!(options.thread(), Some(7));
         assert_eq!(CallOptions::new().with_thread(7).abi(), CallAbi::Auto);
+    }
+
+    #[test]
+    fn safe_point_is_configurable() {
+        let options = CallOptions::new()
+            .with_safe_point(Address::new(0x401000))
+            .with_safe_point_timeout(Duration::from_millis(250));
+        assert_eq!(options.safe_point(), Some(Address::new(0x401000)));
+        assert_eq!(options.safe_point_timeout(), Duration::from_millis(250));
     }
 }

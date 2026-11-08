@@ -8,6 +8,9 @@ use std::io::{self, Write};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+/// Counter incremented by the frame-loop tick used by the Wine tests.
+static TICK: AtomicU64 = AtomicU64::new(0);
+
 /// 64-bit scratch buffer written by `fixture_store` and read by the parent.
 ///
 /// The fixture never touches it anywhere else, so the parent can read it
@@ -96,6 +99,17 @@ pub extern "C" fn fixture_ping() -> u64 {
     PING_VALUE
 }
 
+/// One iteration of the fixture's frame loop.
+///
+/// Its entry is used as the safe point for the Wine 32-bit tests: the spin
+/// loop calls it repeatedly, so a hardware breakpoint there fires promptly
+/// while the target is in 32-bit code.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn fixture_tick() -> u64 {
+    TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Terminates the fixture process from inside a remote call.
 #[unsafe(no_mangle)]
 #[inline(never)]
@@ -145,6 +159,10 @@ fn main() {
         address_of(std::ptr::addr_of!(BUFFER).cast()),
         address_of(std::ptr::addr_of!(FIXTURE_DATA).cast()),
     );
+    {
+        use std::fmt::Write as _;
+        let _ = write!(ready, " tick={:#x}", address_of(fixture_tick as *const ()),);
+    }
     #[cfg(all(windows, target_arch = "x86"))]
     {
         use std::fmt::Write as _;
@@ -159,6 +177,12 @@ fn main() {
 
     println!("{ready}");
     io::stdout().flush().expect("flush READY");
+
+    if std::env::var_os("MEMDIVER_CALL_FIXTURE_SPIN").is_some() {
+        loop {
+            std::hint::black_box(fixture_tick());
+        }
+    }
 
     let stdin = io::stdin();
     let mut line = String::new();

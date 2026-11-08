@@ -20,6 +20,7 @@ memdiver-call/          Safe API crate (#![forbid(unsafe_code)])
     CHANGELOG.md
 memdiver-call-sys/      Unsafe platform mechanism (all FFI lives here)
     src/linux.rs        ptrace, hardware breakpoint, save/restore/detach
+    src/wine32.rs       native Linux -> 32-bit Windows PE under Wine
     src/windows.rs      CreateRemoteThread stub mechanism
     src/stub.rs         generated x64/x86 stub bytes (unit-tested on every host)
     src/frame.rs        SysV AMD64 call-frame layout (unit-tested on every host)
@@ -28,6 +29,7 @@ memdiver-call-tests/    Fixture binary and end-to-end tests (publish = false)
     src/bin/memdiver-call-fixture.rs
     examples/call_fixture.rs
     tests/remote_call.rs
+    tests/wine32.rs     opt-in native Linux -> Wine 32-bit suite
     tests/common/mod.rs
 ```
 
@@ -56,7 +58,17 @@ WINEPREFIX="$PWD/.wine-wow64" WINEDEBUG=-all \
     cargo test --workspace --target i686-pc-windows-gnu
 ```
 
-Native Windows CI runs the same tests on `x86_64-pc-windows-msvc` and
+The native-Linux-to-Wine-`x86` tests are opt-in because they need Wine,
+MinGW, and a prebuilt i686 fixture:
+
+```sh
+cargo build -p memdiver-call-tests --target i686-pc-windows-gnu \
+    --bin memdiver-call-fixture
+WINEPREFIX="$PWD/target/wine32-test-prefix" WINEDEBUG=-all \
+    cargo test -p memdiver-call-tests --features wine32-tests --test wine32
+```
+
+Native Windows CI runs the same Windows tests on `x86_64-pc-windows-msvc` and
 `i686-pc-windows-msvc`. Wine proves the mechanism; it does not enforce Control
 Flow Guard or CET, so native CI is authoritative for those mitigations.
 
@@ -73,6 +85,10 @@ cargo check --workspace --all-targets --target i686-pc-windows-gnu
 cargo clippy --workspace --all-targets --target i686-pc-windows-gnu -- -D warnings
 cargo package --list -p memdiver-call
 cargo package --list -p memdiver-call-sys
+
+# Optional, after building the i686 fixture (see above):
+WINEPREFIX="$PWD/target/wine32-test-prefix" WINEDEBUG=-all \
+    cargo test -p memdiver-call-tests --features wine32-tests --test wine32
 ```
 
 ## Documentation

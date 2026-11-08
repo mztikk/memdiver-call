@@ -12,6 +12,21 @@ use crate::options::{CallAbi, CallOptions};
 /// Maximum number of argument slots in v1.
 const MAX_ARGUMENTS: usize = 6;
 
+/// What kind of target a [`RemoteCaller`] is bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TargetKind {
+    /// A process on the same operating system and with the same bitness as the
+    /// caller.
+    Native,
+    /// A 32-bit Windows PE hosted by Wine, called from a native Linux
+    /// `x86_64` process.
+    ///
+    /// This target kind is only produced by [`RemoteCaller::open_wine`] and
+    /// [`RemoteCaller::new_wine`].
+    Wine32,
+}
+
 /// A pinned target process plus the execution resource needed to call into it.
 ///
 /// The caller keeps a writable [`memdiver::Process`] for all memory access and,
@@ -19,6 +34,12 @@ const MAX_ARGUMENTS: usize = 6;
 /// other rights the mechanism needs. On Linux no trace is kept between calls:
 /// each call attaches to the main thread, runs, restores the thread state, and
 /// detaches.
+///
+/// [`RemoteCaller::open_wine`] targets a 32-bit Windows PE hosted by Wine from
+/// a native Linux `x86_64` caller. The target must be the process that hosts
+/// the PE (the one whose command line is the PE path), not the `wine`
+/// launcher. Wine may reparent that process, so a caller that spawns Wine
+/// should set `PR_SET_CHILD_SUBREAPER` to keep it traceable under Yama.
 ///
 /// The type is `Send + Sync`, but calls on one instance are serialized with an
 /// internal mutex. Two separate callers for the same target are not
@@ -44,6 +65,7 @@ pub struct RemoteCaller {
     #[cfg(windows)]
     execution: memdiver_call_sys::Execution,
     serialization: Mutex<()>,
+    kind: TargetKind,
 }
 
 impl RemoteCaller {
@@ -76,6 +98,43 @@ impl RemoteCaller {
         adopt(process)
     }
 
+    /// Opens the process that hosts a 32-bit Windows PE under Wine.
+    ///
+    /// `pid` must be the Linux PID of the PE-hosting process, not the `wine`
+    /// launcher. The caller must be able to `ptrace` that process: under Yama
+    /// `ptrace_scope = 1` it must be a descendant of the caller, which normally
+    /// means the caller spawned Wine with `PR_SET_CHILD_SUBREAPER` set.
+    /// Processes started by Steam/Proton may live in a different PID namespace
+    /// and cannot be reached from outside their container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Open`] when the memory handle cannot be opened,
+    /// [`Error::TargetExited`] when the target is not alive,
+    /// [`Error::Unsupported`] when the target is not a 32-bit PE under Wine or
+    /// the host is not Linux, and [`Error::Memory`] when detection fails.
+    pub fn open_wine(pid: u32) -> Result<Self, Error> {
+        open_wine_pinned(pid)
+    }
+
+    /// Adopts an existing writable handle for a 32-bit Windows PE under Wine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] before any operating-system call when the
+    /// handle is read-only, [`Error::TargetExited`] when the target is gone,
+    /// and [`Error::Unsupported`] when the target is not a 32-bit PE under
+    /// Wine or the host is not Linux.
+    pub fn new_wine(process: Process) -> Result<Self, Error> {
+        adopt_wine(process)
+    }
+
+    /// Returns what kind of target this caller is bound to.
+    #[must_use]
+    pub fn target_kind(&self) -> TargetKind {
+        self.kind
+    }
+
     /// Returns the underlying memory handle.
     #[must_use]
     pub fn process(&self) -> &Process {
@@ -95,16 +154,22 @@ impl RemoteCaller {
     /// a lock held by a thread that is stopped. Use it only on processes you
     /// own or are explicitly authorized to inspect.
     ///
+    /// On a Wine 32-bit target, [`CallOptions::with_safe_point`] waits for the
+    /// target's main thread to reach a chosen 32-bit instruction before
+    /// redirecting it. Without a safe point the call only proceeds when the
+    /// thread happens to be stopped in 32-bit code.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Unsupported`] for an unsupported ABI, thread, or host
     /// architecture, [`Error::InvalidArgument`] for more than six arguments or
     /// a value that does not fit the target, [`Error::InvalidAddress`] when the
     /// function is not in an executable live region, [`Error::TargetExited`]
-    /// when the target is gone, [`Error::CallFailed`] when the call did not
-    /// return a normal result, and [`Error::Cleanup`] when target state could
-    /// not be restored or resources could not be released. All validation
-    /// errors are returned before the target is touched.
+    /// when the target is gone, [`Error::SafePointTimeout`] when a Wine target
+    /// never reaches the safe point, [`Error::CallFailed`] when the call did
+    /// not return a normal result, and [`Error::Cleanup`] when target state
+    /// could not be restored or resources could not be released. All
+    /// validation errors are returned before the target is touched.
     pub fn call(
         &self,
         function: Address,
@@ -125,12 +190,17 @@ impl RemoteCaller {
     /// The export is rejected before the call when it is not in an executable
     /// live region.
     ///
+    /// PE exports are not available for a Wine 32-bit target: `memdiver`
+    /// resolves ELF exports on a native Linux host, and the PE is not an ELF
+    /// module. Pass the function address to [`RemoteCaller::call`] instead.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::ExportNotFound`] when the module is loaded but does not
     /// export the name, [`Error::Memory`] when resolution itself fails, and the
     /// same errors as [`RemoteCaller::call`]. In particular, a data export
-    /// returns [`Error::InvalidAddress`].
+    /// returns [`Error::InvalidAddress`]. On a Wine 32-bit target this method
+    /// always returns [`Error::Unsupported`].
     pub fn call_export(
         &self,
         module: &str,
@@ -138,6 +208,12 @@ impl RemoteCaller {
         args: &[u64],
         options: &CallOptions,
     ) -> Result<u64, Error> {
+        if self.kind == TargetKind::Wine32 {
+            return Err(Error::Unsupported {
+                operation: "call_export",
+                reason: "PE exports cannot be resolved from a native Linux caller; pass the function address",
+            });
+        }
         let address = self
             .process
             .module_export(module, export)
@@ -165,6 +241,26 @@ impl RemoteCaller {
                 reason: "at most six arguments are supported",
             });
         }
+        match self.kind {
+            TargetKind::Wine32 => self.validate_wine32(function, args, options),
+            _ => self.validate_native(function, args, options),
+        }
+    }
+
+    /// Validation for a native same-OS, same-bitness target.
+    fn validate_native(
+        &self,
+        function: Address,
+        args: &[u64],
+        options: &CallOptions,
+    ) -> Result<(), Error> {
+        let _ = args;
+        if options.safe_point().is_some() {
+            return Err(Error::Unsupported {
+                operation: "call",
+                reason: "safe points only apply to Wine 32-bit targets",
+            });
+        }
         validate_abi(options, self.process.pid())?;
         if function.is_null() {
             return Err(Error::InvalidAddress {
@@ -189,14 +285,78 @@ impl RemoteCaller {
                 }
             }
         }
-        match self.process.region_at(function) {
+        self.require_executable(function)
+    }
+
+    /// Validation for a 32-bit Windows PE under Wine.
+    fn validate_wine32(
+        &self,
+        function: Address,
+        args: &[u64],
+        options: &CallOptions,
+    ) -> Result<(), Error> {
+        if function.is_null() {
+            return Err(Error::InvalidAddress {
+                address: function,
+                reason: "the null address is not callable",
+            });
+        }
+        if function.get() > u64::from(u32::MAX) {
+            return Err(Error::InvalidAddress {
+                address: function,
+                reason: "the address does not fit in a 32-bit target",
+            });
+        }
+        for (index, argument) in args.iter().enumerate() {
+            if *argument > u64::from(u32::MAX) {
+                return Err(Error::InvalidArgument {
+                    index,
+                    reason: "the value does not fit in a 32-bit argument slot",
+                });
+            }
+        }
+        if let Some(tid) = options.thread() {
+            if tid != self.process.pid() {
+                return Err(Error::Unsupported {
+                    operation: "call",
+                    reason: "only the main thread (TID == PID) is supported",
+                });
+            }
+        }
+        if let Some(safe_point) = options.safe_point() {
+            if safe_point.is_null() {
+                return Err(Error::InvalidAddress {
+                    address: safe_point,
+                    reason: "the null address is not a safe point",
+                });
+            }
+            if safe_point.get() > u64::from(u32::MAX) {
+                return Err(Error::InvalidAddress {
+                    address: safe_point,
+                    reason: "the safe point does not fit in a 32-bit target",
+                });
+            }
+            if safe_point == function {
+                return Err(Error::InvalidArgument {
+                    index: 0,
+                    reason: "the safe point must differ from the function address",
+                });
+            }
+            self.require_executable(safe_point)?;
+        }
+        self.require_executable(function)
+    }
+
+    /// Verifies that `address` is in an executable live region.
+    fn require_executable(&self, address: Address) -> Result<(), Error> {
+        match self.process.region_at(address) {
             Ok(Some(region)) if region.is_executable() => Ok(()),
             Ok(Some(_)) => Err(Error::InvalidAddress {
-                address: function,
+                address,
                 reason: "the address is not in an executable region",
             }),
             Ok(None) => Err(Error::InvalidAddress {
-                address: function,
+                address,
                 reason: "the address is not in a live region",
             }),
             Err(source) => Err(Error::Memory {
@@ -211,6 +371,7 @@ impl fmt::Debug for RemoteCaller {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteCaller")
             .field("pid", &self.process.pid())
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
@@ -240,6 +401,7 @@ fn open_pinned(pid: u32) -> Result<RemoteCaller, Error> {
         process,
         execution,
         serialization: Mutex::new(()),
+        kind: TargetKind::Native,
     })
 }
 
@@ -270,6 +432,7 @@ fn open_pinned(pid: u32) -> Result<RemoteCaller, Error> {
     Ok(RemoteCaller {
         process,
         serialization: Mutex::new(()),
+        kind: TargetKind::Native,
     })
 }
 
@@ -292,6 +455,7 @@ fn adopt(process: Process) -> Result<RemoteCaller, Error> {
         process,
         execution,
         serialization: Mutex::new(()),
+        kind: TargetKind::Native,
     })
 }
 
@@ -317,6 +481,56 @@ fn adopt(process: Process) -> Result<RemoteCaller, Error> {
     Ok(RemoteCaller {
         process,
         serialization: Mutex::new(()),
+        kind: TargetKind::Native,
+    })
+}
+
+/// Opens the PE-hosting process of a 32-bit Windows target under Wine.
+#[cfg(target_os = "linux")]
+fn open_wine_pinned(pid: u32) -> Result<RemoteCaller, Error> {
+    let process = Process::open(pid).map_err(|source| Error::Open {
+        pid,
+        operation: "memdiver::Process::open",
+        source: Box::new(source),
+    })?;
+    adopt_wine(process)
+}
+
+/// Wine 32-bit targets are only reachable from a native Linux host.
+#[cfg(not(target_os = "linux"))]
+fn open_wine_pinned(pid: u32) -> Result<RemoteCaller, Error> {
+    let _ = pid;
+    Err(Error::Unsupported {
+        operation: "RemoteCaller::open_wine",
+        reason: "Wine targets are only supported from a native Linux host",
+    })
+}
+
+/// Adopts a writable handle for a 32-bit Windows PE under Wine.
+#[cfg(target_os = "linux")]
+fn adopt_wine(process: Process) -> Result<RemoteCaller, Error> {
+    if !process.is_writable() {
+        return Err(Error::ReadOnly);
+    }
+    let pid = process.pid();
+    if !process.is_alive() {
+        return Err(Error::TargetExited { pid });
+    }
+    memdiver_call_sys::wine32::detect(&process).map_err(|error| map_wine_error(error, pid))?;
+    Ok(RemoteCaller {
+        process,
+        serialization: Mutex::new(()),
+        kind: TargetKind::Wine32,
+    })
+}
+
+/// Wine 32-bit targets are only reachable from a native Linux host.
+#[cfg(not(target_os = "linux"))]
+fn adopt_wine(process: Process) -> Result<RemoteCaller, Error> {
+    let _ = process;
+    Err(Error::Unsupported {
+        operation: "RemoteCaller::new_wine",
+        reason: "Wine targets are only supported from a native Linux host",
     })
 }
 
@@ -328,6 +542,12 @@ fn call_pinned(
     args: &[u64],
     options: &CallOptions,
 ) -> Result<u64, Error> {
+    if caller.kind == TargetKind::Wine32 {
+        return Err(Error::Unsupported {
+            operation: "call",
+            reason: "Wine targets are only supported from a native Linux host",
+        });
+    }
     let pid = caller.process.pid();
     let outcome = memdiver_call_sys::call(
         &caller.execution,
@@ -339,9 +559,23 @@ fn call_pinned(
     finish(function, pid, outcome)
 }
 
-/// Runs a validated call on Linux, attaching for the duration.
+/// Dispatches a validated call on Linux.
 #[cfg(target_os = "linux")]
 fn call_pinned(
+    caller: &RemoteCaller,
+    function: Address,
+    args: &[u64],
+    options: &CallOptions,
+) -> Result<u64, Error> {
+    match caller.kind {
+        TargetKind::Wine32 => wine32_call(caller, function, args, options),
+        _ => native_call(caller, function, args, options),
+    }
+}
+
+/// Runs a validated call on a native Linux target, attaching for the duration.
+#[cfg(target_os = "linux")]
+fn native_call(
     caller: &RemoteCaller,
     function: Address,
     args: &[u64],
@@ -357,6 +591,47 @@ fn call_pinned(
     }
     let outcome = attached.call(&caller.process, function.get(), args);
     finish(function, pid, outcome)
+}
+
+/// Runs a validated call on a 32-bit Windows PE under Wine.
+#[cfg(target_os = "linux")]
+fn wine32_call(
+    caller: &RemoteCaller,
+    function: Address,
+    args: &[u64],
+    options: &CallOptions,
+) -> Result<u64, Error> {
+    let pid = caller.process.pid();
+    let tid = options.thread().unwrap_or(pid);
+    let attached =
+        memdiver_call_sys::wine32::attach(pid, tid).map_err(|error| map_open(error, pid))?;
+    if !caller.process.is_alive() {
+        return Err(detach_wine32_after(
+            attached,
+            Error::TargetExited { pid },
+            pid,
+        ));
+    }
+    let outcome = attached.call(
+        &caller.process,
+        function.get(),
+        args,
+        wine_abi(options.abi()),
+        options.safe_point().map(Address::get),
+        options.safe_point_timeout(),
+    );
+    finish(function, pid, outcome)
+}
+
+/// Maps a `memdiver-call` ABI choice to a 32-bit Windows convention.
+#[cfg(target_os = "linux")]
+fn wine_abi(abi: CallAbi) -> memdiver_call_sys::wine32::WineAbi {
+    match abi {
+        CallAbi::Auto | CallAbi::Cdecl => memdiver_call_sys::wine32::WineAbi::Cdecl,
+        CallAbi::Stdcall => memdiver_call_sys::wine32::WineAbi::Stdcall,
+        CallAbi::Thiscall => memdiver_call_sys::wine32::WineAbi::Thiscall,
+        CallAbi::Fastcall => memdiver_call_sys::wine32::WineAbi::Fastcall,
+    }
 }
 
 /// Maps a `memdiver-call-sys` ABI choice.
@@ -462,6 +737,22 @@ fn map_open(error: SysError, pid: u32) -> Error {
     }
 }
 
+/// Maps a failure while detecting a Wine target.
+#[cfg(target_os = "linux")]
+fn map_wine_error(error: SysError, pid: u32) -> Error {
+    match error {
+        SysError::Unsupported { operation, reason } => Error::Unsupported { operation, reason },
+        SysError::Inspect { operation, source } => Error::Memory { operation, source },
+        SysError::TargetExited => Error::TargetExited { pid },
+        SysError::Platform(failure) | SysError::Open(failure) => Error::Open {
+            pid,
+            operation: failure.operation(),
+            source: Box::new(PlatformError::new(failure.code())),
+        },
+        other => map_call_error(other, Address::NULL, pid),
+    }
+}
+
 /// Maps a call failure.
 fn map_call_error(error: SysError, function: Address, pid: u32) -> Error {
     match error {
@@ -476,6 +767,10 @@ fn map_call_error(error: SysError, function: Address, pid: u32) -> Error {
             source: PlatformError::new(failure.code()),
         },
         SysError::TargetExited => Error::TargetExited { pid },
+        SysError::SafePointTimeout { address, timeout } => Error::SafePointTimeout {
+            address: Address::new(address),
+            timeout,
+        },
         SysError::CallFailed(status) => Error::CallFailed {
             function,
             status: status_from_sys(status),
@@ -525,6 +820,23 @@ fn close_after(execution: memdiver_call_sys::Execution, failure: Error, pid: u32
 /// Detaches and keeps both the original failure and any detach failure.
 #[cfg(target_os = "linux")]
 fn detach_after(attached: memdiver_call_sys::Attached, failure: Error, pid: u32) -> Error {
+    match attached.detach() {
+        Ok(()) => failure,
+        Err(cleanup) => Error::Cleanup {
+            function: None,
+            call: Some(Box::new(failure)),
+            cleanup: Box::new(map_cleanup_error(cleanup, pid)),
+        },
+    }
+}
+
+/// Detaches a Wine 32-bit attachment and keeps both failures.
+#[cfg(target_os = "linux")]
+fn detach_wine32_after(
+    attached: memdiver_call_sys::wine32::Attached,
+    failure: Error,
+    pid: u32,
+) -> Error {
     match attached.detach() {
         Ok(()) => failure,
         Err(cleanup) => Error::Cleanup {
@@ -642,6 +954,25 @@ mod tests {
             Error::InvalidAddress { address, reason } => {
                 assert_eq!(address, Address::new(0x2000));
                 assert_eq!(reason, "not executable");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn safe_point_timeouts_are_mapped() {
+        let error = map_call_error(
+            SysError::SafePointTimeout {
+                address: 0x0040_1000,
+                timeout: std::time::Duration::from_millis(100),
+            },
+            FUNCTION,
+            7,
+        );
+        match error {
+            Error::SafePointTimeout { address, timeout } => {
+                assert_eq!(address, Address::new(0x0040_1000));
+                assert_eq!(timeout, std::time::Duration::from_millis(100));
             }
             other => panic!("unexpected error: {other:?}"),
         }

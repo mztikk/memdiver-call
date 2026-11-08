@@ -2,6 +2,7 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::time::Duration;
 
 /// The outcome of one remote-call attempt.
 ///
@@ -135,6 +136,13 @@ pub enum SysError {
     Open(OsFailure),
     /// The target exited or its PID was reused.
     TargetExited,
+    /// The target did not reach the safe point within the allotted time.
+    SafePointTimeout {
+        /// Safe-point address that was waited for.
+        address: u64,
+        /// How long the wait was allowed to take.
+        timeout: Duration,
+    },
     /// An operating-system call failed.
     Platform(OsFailure),
     /// The call ran but did not finish normally.
@@ -173,6 +181,10 @@ impl fmt::Display for SysError {
             }
             Self::Open(failure) => write!(f, "failed to open the execution resource: {failure}"),
             Self::TargetExited => f.write_str("the target process exited or its pid was reused"),
+            Self::SafePointTimeout { address, timeout } => write!(
+                f,
+                "the target did not reach the safe point {address:#x} within {timeout:?}"
+            ),
             Self::Platform(failure) => failure.fmt(f),
             Self::CallFailed(status) => write!(f, "the remote call failed: {status}"),
             Self::Inspect { operation, source } => write!(f, "{operation} failed: {source}"),

@@ -6,6 +6,7 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::time::Duration;
 
 use memdiver::Address;
 
@@ -112,6 +113,16 @@ pub enum Error {
         /// PID of the target.
         pid: u32,
     },
+    /// The target did not reach the supplied safe point in time.
+    ///
+    /// This is specific to a native Linux caller targeting a 32-bit Windows
+    /// PE under Wine. The call was not attempted.
+    SafePointTimeout {
+        /// Safe-point address that was waited for.
+        address: Address,
+        /// How long the wait was allowed to take.
+        timeout: Duration,
+    },
     /// The platform cannot perform this call.
     Unsupported {
         /// Operation that is unsupported.
@@ -205,6 +216,10 @@ impl fmt::Display for Error {
             Self::TargetExited { pid } => {
                 write!(f, "process {pid} exited or its pid was reused")
             }
+            Self::SafePointTimeout { address, timeout } => write!(
+                f,
+                "the target did not reach the safe point {address} within {timeout:?}"
+            ),
             Self::Unsupported { operation, reason } => {
                 write!(f, "{operation} is unsupported: {reason}")
             }

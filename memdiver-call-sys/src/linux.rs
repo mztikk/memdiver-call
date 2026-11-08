@@ -53,10 +53,10 @@ const XSTATE_BUFFER_SIZE: usize = 4096;
 const DEBUG_REGISTER_BASE: usize = std::mem::offset_of!(libc::user, u_debugreg);
 
 /// `DR6` holds the breakpoint status bits.
-const DR6_OFFSET: usize = DEBUG_REGISTER_BASE + 6 * 8;
+pub(crate) const DR6_OFFSET: usize = DEBUG_REGISTER_BASE + 6 * 8;
 
 /// `DR7` holds the breakpoint control bits.
-const DR7_OFFSET: usize = DEBUG_REGISTER_BASE + 7 * 8;
+pub(crate) const DR7_OFFSET: usize = DEBUG_REGISTER_BASE + 7 * 8;
 
 /// A thread stopped by [`attach`], with best-effort detach on drop.
 ///
@@ -141,14 +141,14 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
 
 /// Saved debug-register state.
 #[derive(Debug)]
-struct DebugState {
-    slots: [u64; 4],
-    dr6: u64,
-    dr7: u64,
+pub(crate) struct DebugState {
+    pub(crate) slots: [u64; 4],
+    pub(crate) dr6: u64,
+    pub(crate) dr7: u64,
 }
 
 /// Saved floating-point/SIMD register set.
-struct FpState {
+pub(crate) struct FpState {
     buffer: Box<AlignedBuffer>,
     len: usize,
     regset: u32,
@@ -280,7 +280,7 @@ fn execute(
 }
 
 /// Waits for the initial `PTRACE_INTERRUPT` stop.
-fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
+pub(crate) fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
     loop {
         let mut status: libc::c_int = 0;
         // SAFETY: `status` is a valid, writable `c_int`; `tid` is the traced
@@ -303,7 +303,11 @@ fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
 }
 
 /// Waits for the hardware breakpoint at the interrupted instruction.
-fn wait_for_breakpoint(tid: libc::pid_t, breakpoint: u64, slot: u8) -> Result<(), SysError> {
+pub(crate) fn wait_for_breakpoint(
+    tid: libc::pid_t,
+    breakpoint: u64,
+    slot: u8,
+) -> Result<(), SysError> {
     let mut forwarded = 0usize;
     loop {
         let mut status: libc::c_int = 0;
@@ -338,7 +342,7 @@ fn wait_for_breakpoint(tid: libc::pid_t, breakpoint: u64, slot: u8) -> Result<()
 }
 
 /// Returns `true` when the current stop is the call-return breakpoint.
-fn is_breakpoint_hit(tid: libc::pid_t, breakpoint: u64, slot: u8) -> bool {
+pub(crate) fn is_breakpoint_hit(tid: libc::pid_t, breakpoint: u64, slot: u8) -> bool {
     let info = match get_siginfo(tid) {
         Ok(info) => info,
         // A group-stop has no signal information; it cannot be our trap.
@@ -364,7 +368,7 @@ fn is_breakpoint_hit(tid: libc::pid_t, breakpoint: u64, slot: u8) -> bool {
 ///
 /// All steps are attempted even when an earlier one fails; the first failure
 /// is returned. A target that is already gone (`ESRCH`) needs no restore.
-fn restore_and_detach(
+pub(crate) fn restore_and_detach(
     tid: libc::pid_t,
     registers: &libc::user_regs_struct,
     fp: &FpState,
@@ -383,7 +387,7 @@ fn restore_and_detach(
 /// On the tested kernel `PTRACE_POKEUSER(DR7)` fails with `EIO` while the
 /// breakpoint-hit status bit in `DR6` is set, so the status bits are cleared
 /// first and the saved `DR6` is restored last.
-fn restore_debug_state(tid: libc::pid_t, saved: &DebugState) -> Result<(), SysError> {
+pub(crate) fn restore_debug_state(tid: libc::pid_t, saved: &DebugState) -> Result<(), SysError> {
     let mut failures = Failures::default();
     failures.record(poke_user(tid, DR6_OFFSET, 0, "PTRACE_POKEUSER(DR6)"));
     failures.record(poke_user(
@@ -410,7 +414,7 @@ fn restore_debug_state(tid: libc::pid_t, saved: &DebugState) -> Result<(), SysEr
 }
 
 /// Detaches the tracee with signal 0.
-fn detach(tid: libc::pid_t) -> Result<(), SysError> {
+pub(crate) fn detach(tid: libc::pid_t) -> Result<(), SysError> {
     match ptrace_raw(libc::PTRACE_DETACH, tid, 0, 0, "PTRACE_DETACH") {
         Ok(_) => Ok(()),
         Err(error) if is_esrch(&error) => Ok(()),
@@ -419,13 +423,13 @@ fn detach(tid: libc::pid_t) -> Result<(), SysError> {
 }
 
 /// Resumes the tracee, delivering `signal` if it is non-zero.
-fn resume(tid: libc::pid_t, signal: libc::c_int) -> Result<(), SysError> {
+pub(crate) fn resume(tid: libc::pid_t, signal: libc::c_int) -> Result<(), SysError> {
     let data = usize::try_from(signal).unwrap_or(0);
     ptrace_raw(libc::PTRACE_CONT, tid, 0, data, "PTRACE_CONT").map(|_| ())
 }
 
 /// Reads the general-purpose registers.
-fn get_registers(tid: libc::pid_t) -> Result<libc::user_regs_struct, SysError> {
+pub(crate) fn get_registers(tid: libc::pid_t) -> Result<libc::user_regs_struct, SysError> {
     let mut registers = MaybeUninit::<libc::user_regs_struct>::uninit();
     ptrace_raw(
         libc::PTRACE_GETREGS,
@@ -440,13 +444,16 @@ fn get_registers(tid: libc::pid_t) -> Result<libc::user_regs_struct, SysError> {
 }
 
 /// Writes the general-purpose registers.
-fn set_registers(tid: libc::pid_t, registers: &libc::user_regs_struct) -> Result<(), SysError> {
+pub(crate) fn set_registers(
+    tid: libc::pid_t,
+    registers: &libc::user_regs_struct,
+) -> Result<(), SysError> {
     let data = std::ptr::from_ref(registers) as usize;
     ptrace_raw(libc::PTRACE_SETREGS, tid, 0, data, "PTRACE_SETREGS").map(|_| ())
 }
 
 /// Reads the signal information for the current stop.
-fn get_siginfo(tid: libc::pid_t) -> Result<libc::siginfo_t, SysError> {
+pub(crate) fn get_siginfo(tid: libc::pid_t) -> Result<libc::siginfo_t, SysError> {
     let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
     ptrace_raw(
         libc::PTRACE_GETSIGINFO,
@@ -461,7 +468,7 @@ fn get_siginfo(tid: libc::pid_t) -> Result<libc::siginfo_t, SysError> {
 }
 
 /// Reads the extended floating-point/SIMD state, falling back to FPREGSET.
-fn get_fp_state(tid: libc::pid_t) -> Result<FpState, SysError> {
+pub(crate) fn get_fp_state(tid: libc::pid_t) -> Result<FpState, SysError> {
     let mut buffer = Box::new(AlignedBuffer([0u8; XSTATE_BUFFER_SIZE]));
     let mut last_error = None;
     for regset in [NT_X86_XSTATE, NT_PRFPREG] {
@@ -493,7 +500,7 @@ fn get_fp_state(tid: libc::pid_t) -> Result<FpState, SysError> {
 }
 
 /// Writes the saved floating-point/SIMD state.
-fn set_fp_state(tid: libc::pid_t, state: &FpState) -> Result<(), SysError> {
+pub(crate) fn set_fp_state(tid: libc::pid_t, state: &FpState) -> Result<(), SysError> {
     let mut iovec = libc::iovec {
         iov_base: state.buffer.0.as_ptr().cast_mut().cast(),
         iov_len: state.len,
@@ -524,7 +531,7 @@ fn regset_request(
 ///
 /// `DR4`/`DR5` alias `DR6`/`DR7` on CPUs without debug extensions and are not
 /// writable through `ptrace`, so they are not saved.
-fn read_debug_state(tid: libc::pid_t) -> Result<DebugState, SysError> {
+pub(crate) fn read_debug_state(tid: libc::pid_t) -> Result<DebugState, SysError> {
     let mut slots = [0u64; 4];
     for (index, slot) in slots.iter_mut().enumerate() {
         *slot = peek_user(tid, debug_register_offset(u8::try_from(index).unwrap_or(0)))?;
@@ -537,13 +544,13 @@ fn read_debug_state(tid: libc::pid_t) -> Result<DebugState, SysError> {
 }
 
 /// Reads one word from `struct user`.
-fn peek_user(tid: libc::pid_t, offset: usize) -> Result<u64, SysError> {
+pub(crate) fn peek_user(tid: libc::pid_t, offset: usize) -> Result<u64, SysError> {
     let value = ptrace_raw(libc::PTRACE_PEEKUSER, tid, offset, 0, "PTRACE_PEEKUSER")?;
     Ok(value as u64)
 }
 
 /// Writes one word to `struct user`.
-fn poke_user(
+pub(crate) fn poke_user(
     tid: libc::pid_t,
     offset: usize,
     value: u64,
@@ -557,7 +564,7 @@ fn poke_user(
 ///
 /// `address` and `data` are interpreted by the request; their types follow the
 /// kernel ABI (`struct user` offset plus a value or pointer encoded as `usize`).
-fn ptrace_raw(
+pub(crate) fn ptrace_raw(
     request: libc::c_uint,
     tid: libc::pid_t,
     address: usize,
@@ -591,12 +598,12 @@ fn ptrace_raw(
 }
 
 /// Returns `true` when `DR7` is unavailable because the thread is gone.
-fn is_esrch(error: &SysError) -> bool {
+pub(crate) fn is_esrch(error: &SysError) -> bool {
     matches!(error, SysError::Platform(failure) if failure.code() == i64::from(libc::ESRCH))
 }
 
 /// Treats a target that no longer exists as already restored.
-fn ignore_exited(result: Result<(), SysError>) -> Result<(), SysError> {
+pub(crate) fn ignore_exited(result: Result<(), SysError>) -> Result<(), SysError> {
     match result {
         Err(error) if is_esrch(&error) => Ok(()),
         other => other,
@@ -607,7 +614,7 @@ fn ignore_exited(result: Result<(), SysError>) -> Result<(), SysError> {
 ///
 /// The fake-return technique only writes the normal stack, so the callee's
 /// `ret` would not match a shadow-stack entry.
-fn check_shadow_stack(pid: u32) -> Result<(), SysError> {
+pub(crate) fn check_shadow_stack(pid: u32) -> Result<(), SysError> {
     let path = format!("/proc/{pid}/status");
     let status = match std::fs::read_to_string(&path) {
         Ok(status) => status,
@@ -657,7 +664,7 @@ fn shadow_stack_enabled(status: &str) -> bool {
 }
 
 /// Verifies that `address` is in an executable region.
-fn ensure_executable(
+pub(crate) fn ensure_executable(
     process: &Process,
     address: u64,
     reason: &'static str,
@@ -715,12 +722,12 @@ fn ensure_frame(process: &Process, layout: FrameLayout) -> Result<(), SysError> 
 }
 
 /// Returns `DR0`–`DR3` offset for `slot`.
-fn debug_register_offset(slot: u8) -> usize {
+pub(crate) fn debug_register_offset(slot: u8) -> usize {
     DEBUG_REGISTER_BASE + usize::from(slot) * 8
 }
 
 /// Wraps a `memdiver` failure with the operation name.
-fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError {
+pub(crate) fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError {
     move |source| SysError::Inspect {
         operation,
         source: Box::new(source),
@@ -728,7 +735,7 @@ fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError 
 }
 
 /// Builds a platform error from an `io::Error`.
-fn platform(operation: &'static str, error: &io::Error) -> SysError {
+pub(crate) fn platform(operation: &'static str, error: &io::Error) -> SysError {
     SysError::Platform(OsFailure::new(
         operation,
         error.raw_os_error().map_or(-1, i64::from),

@@ -90,6 +90,15 @@ jobs:
           WINEDEBUG: "-all"
           CARGO_TARGET_I686_PC_WINDOWS_GNU_RUNNER: wine
         run: cargo test --workspace --target i686-pc-windows-gnu
+      - name: Build the 32-bit fixture for the native Wine tests
+        run: cargo build -p memdiver-call-tests --target i686-pc-windows-gnu --bin memdiver-call-fixture
+      - name: Clippy native Wine 32-bit tests
+        run: cargo clippy -p memdiver-call-tests --features wine32-tests --test wine32 -- -D warnings
+      - name: Test native Linux -> Wine 32-bit
+        env:
+          WINEPREFIX: ${{ github.workspace }}/target/wine32-ci-prefix
+          WINEDEBUG: "-all"
+        run: cargo test -p memdiver-call-tests --features wine32-tests --test wine32 -- --test-threads=1
 
   msrv:
     name: MSRV 1.85

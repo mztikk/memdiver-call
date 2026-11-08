@@ -73,6 +73,7 @@ dependencies = [
 name = "memdiver-call-tests"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "memdiver",
  "memdiver-call",
 ]
