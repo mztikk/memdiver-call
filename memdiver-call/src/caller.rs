@@ -88,6 +88,13 @@ impl RemoteCaller {
     /// pointed-to memory and its lifetime; v1 does not copy strings, structs, or
     /// buffers into the target.
     ///
+    /// This method is safe Rust with respect to the caller's memory, but it can
+    /// **crash or corrupt the target**. The library cannot validate a function
+    /// signature, a calling convention, an argument layout, or the side effects
+    /// of the called code. The target may deadlock if the called function needs
+    /// a lock held by a thread that is stopped. Use it only on processes you
+    /// own or are explicitly authorized to inspect.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Unsupported`] for an unsupported ABI, thread, or host
@@ -377,7 +384,7 @@ fn check_bitness(process: &Process) -> Result<(), Error> {
     };
     if width != expected {
         return Err(Error::Unsupported {
-            operation: "RemoteCaller::open",
+            operation: "RemoteCaller",
             reason: "the target bitness differs from the host bitness",
         });
     }

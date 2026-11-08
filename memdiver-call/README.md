@@ -111,8 +111,6 @@ runs on a fresh thread, which has the opposite threading assumptions. The
 library cannot solve that generally.
 
 Use this only on processes you own or are explicitly authorized to inspect.
-Remote function invocation is a dual-use capability; the operating-system
-permission model is the only access boundary.
 
 ## Limitations
 
@@ -173,12 +171,22 @@ The operation is not stealthy:
   visible process has new private executable memory only for the duration of
   the call.
 
+## Security and ethics
+
+Remote function invocation is a dual-use primitive: it is legitimate for
+debugging, modding with consent, automation of software you own, and research,
+and it is also a standard malware technique. This library takes the operating
+system's permission model as the only access boundary. Use it only on
+processes you own or are explicitly authorized to inspect, and treat the
+ability to call into a process as equivalent to the ability to run code in it.
+
 ## Example
 
 The workspace contains a runnable example that spawns the test fixture and
 calls one of its functions:
 
 ```sh
+cargo build --workspace
 cargo run -p memdiver-call-tests --example call_fixture
 ```
 

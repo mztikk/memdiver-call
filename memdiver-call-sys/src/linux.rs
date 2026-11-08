@@ -521,6 +521,9 @@ fn regset_request(
 }
 
 /// Reads the four breakpoint slots plus `DR6` and `DR7`.
+///
+/// `DR4`/`DR5` alias `DR6`/`DR7` on CPUs without debug extensions and are not
+/// writable through `ptrace`, so they are not saved.
 fn read_debug_state(tid: libc::pid_t) -> Result<DebugState, SysError> {
     let mut slots = [0u64; 4];
     for (index, slot) in slots.iter_mut().enumerate() {
