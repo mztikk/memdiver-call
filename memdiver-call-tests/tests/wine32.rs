@@ -100,6 +100,10 @@ struct WineFixture {
     stdcall: u64,
     thiscall: u64,
     fastcall: u64,
+    add64: u64,
+    mix64: u64,
+    stdcall64: u64,
+    thiscall64: u64,
 }
 
 impl WineFixture {
@@ -177,6 +181,10 @@ impl WineFixture {
             stdcall: number(&fields, "stdcall"),
             thiscall: number(&fields, "thiscall"),
             fastcall: number(&fields, "fastcall"),
+            add64: number(&fields, "add64"),
+            mix64: number(&fields, "mix64"),
+            stdcall64: number(&fields, "stdcall64"),
+            thiscall64: number(&fields, "thiscall64"),
         }
     }
 
@@ -332,6 +340,119 @@ fn pointer_arguments_and_x86_conventions() {
             )
             .expect("thiscall"),
         105
+    );
+}
+
+#[test]
+fn wide_arguments_use_two_stack_slots() {
+    let fixture = WineFixture::spawn();
+    let caller = fixture.open();
+
+    // cdecl: fixture_add64(a: u64, b: u64).
+    let a = 0x1_0000_0003u64;
+    let b = 0x2_0000_0005u64;
+    let options = fixture.options().with_wide_arguments(&[0, 1]);
+    assert_eq!(
+        caller
+            .call(Address::new(fixture.add64), &[a, b], &options)
+            .expect("add64"),
+        a.wrapping_add(b)
+    );
+
+    // cdecl mixed widths: fixture_mix64(a: u32, b: u64, c: u32, d: u64).
+    let a32 = 7u32;
+    let b64 = 0x1_0000_0009u64;
+    let c32 = 0xAAAAu32;
+    let d64 = 0x2_0000_000Bu64;
+    let expected =
+        u64::from(a32) ^ b64.wrapping_mul(3) ^ (u64::from(c32) << 32) ^ d64.wrapping_mul(5);
+    let options = fixture.options().with_wide_arguments(&[1, 3]);
+    assert_eq!(
+        caller
+            .call(
+                Address::new(fixture.mix64),
+                &[u64::from(a32), b64, u64::from(c32), d64],
+                &options,
+            )
+            .expect("mix64"),
+        expected
+    );
+
+    // stdcall with two wide arguments.
+    let options = fixture
+        .options()
+        .with_wide_arguments(&[0, 1])
+        .with_abi(CallAbi::Stdcall);
+    assert_eq!(
+        caller
+            .call(Address::new(fixture.stdcall64), &[10, 20], &options)
+            .expect("stdcall64"),
+        30
+    );
+
+    // thiscall with a wide transport and a narrow seat.
+    let transport = 0x1122_3344_5566_7788u64;
+    let seat = 7u32;
+    let expected = u64::from(100u32) ^ transport ^ (u64::from(seat) << 32);
+    let options = fixture
+        .options()
+        .with_wide_arguments(&[1])
+        .with_abi(CallAbi::Thiscall);
+    assert_eq!(
+        caller
+            .call(
+                Address::new(fixture.thiscall64),
+                &[100, transport, u64::from(seat)],
+                &options,
+            )
+            .expect("thiscall64"),
+        expected
+    );
+}
+
+#[test]
+fn wide_argument_validation() {
+    let fixture = WineFixture::spawn();
+    let caller = fixture.open();
+
+    let options = fixture.options().with_wide_arguments(&[2]);
+    let error = caller
+        .call(Address::new(fixture.add), &[1, 2], &options)
+        .expect_err("out of range");
+    assert!(
+        matches!(error, Error::InvalidArgument { index: 2, .. }),
+        "unexpected error: {error:?}"
+    );
+
+    let options = fixture.options().with_wide_arguments(&[0, 0]);
+    let error = caller
+        .call(Address::new(fixture.add), &[1, 2], &options)
+        .expect_err("duplicate");
+    assert!(
+        matches!(error, Error::InvalidArgument { index: 0, .. }),
+        "unexpected error: {error:?}"
+    );
+
+    let options = fixture.options().with_wide_arguments(&[0]);
+    let error = caller
+        .call(Address::new(fixture.add), &[1, 0x1_0000_0000], &options)
+        .expect_err("narrow overflow");
+    assert!(
+        matches!(error, Error::InvalidArgument { index: 1, .. }),
+        "unexpected error: {error:?}"
+    );
+
+    // `this` is a register argument and cannot be 64-bit.
+    let options = fixture
+        .options()
+        .with_wide_arguments(&[0])
+        .with_abi(CallAbi::Thiscall);
+    let error = caller
+        .call(Address::new(fixture.thiscall64), &[1, 2, 3], &options)
+        .expect_err("wide this");
+    assert!(
+        matches!(error, Error::Unsupported { .. }),
+        "unexpected error: {error:?}"
     );
 }
 

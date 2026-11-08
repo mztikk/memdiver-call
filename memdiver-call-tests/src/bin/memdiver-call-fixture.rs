@@ -133,6 +133,38 @@ pub extern "fastcall" fn fixture_fastcall_add(a: u32, b: u32) -> u64 {
     u64::from(a.wrapping_add(b))
 }
 
+/// Adds two 64-bit integers; on `x86` each argument occupies two stack slots.
+#[cfg(all(windows, target_arch = "x86"))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn fixture_add64(a: u64, b: u64) -> u64 {
+    a.wrapping_add(b)
+}
+
+/// Mixes 32-bit and 64-bit arguments; on `x86` the wide ones use two slots.
+#[cfg(all(windows, target_arch = "x86"))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn fixture_mix64(a: u32, b: u64, c: u32, d: u64) -> u64 {
+    u64::from(a) ^ b.wrapping_mul(3) ^ (u64::from(c) << 32) ^ d.wrapping_mul(5)
+}
+
+/// `stdcall` variant with two 64-bit arguments.
+#[cfg(all(windows, target_arch = "x86"))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "stdcall" fn fixture_stdcall64(a: u64, b: u64) -> u64 {
+    a.wrapping_add(b)
+}
+
+/// `thiscall` variant with `this`, a 64-bit argument, and a 32-bit argument.
+#[cfg(all(windows, target_arch = "x86"))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "thiscall" fn fixture_thiscall64(this: u32, transport: u64, seat: u32) -> u64 {
+    u64::from(this) ^ transport ^ (u64::from(seat) << 32)
+}
+
 /// `thiscall` variant for Windows `x86`; `this` is ignored.
 #[cfg(all(windows, target_arch = "x86"))]
 #[unsafe(no_mangle)]
@@ -172,6 +204,14 @@ fn main() {
             address_of(fixture_stdcall_add as *const ()),
             address_of(fixture_fastcall_add as *const ()),
             address_of(fixture_thiscall_add as *const ()),
+        );
+        let _ = write!(
+            ready,
+            " add64={:#x} mix64={:#x} stdcall64={:#x} thiscall64={:#x}",
+            address_of(fixture_add64 as *const ()),
+            address_of(fixture_mix64 as *const ()),
+            address_of(fixture_stdcall64 as *const ()),
+            address_of(fixture_thiscall64 as *const ()),
         );
     }
 

@@ -24,8 +24,11 @@ All notable changes to `memdiver-call` are documented here. The format follows
 - Native Linux `x86_64` → 32-bit Windows PE under Wine:
   `RemoteCaller::open_wine`/`new_wine`, a native `ptrace` backend in 32-bit
   compatibility mode, the Windows `x86` calling conventions, `EDX:EAX`
-  results, and hardware-breakpoint safe points (`with_safe_point`,
-  `with_safe_point_timeout`, `Error::SafePointTimeout`).
+  results, hardware-breakpoint safe points (`with_safe_point`,
+  `with_safe_point_timeout`, `Error::SafePointTimeout`), and 64-bit stack
+  arguments (`CallOptions::with_wide_arguments`, two dwords low-first).
+- 64-bit stack arguments on native Windows `x86` through the generated stub;
+  the shared x86 layout rejects 64-bit register arguments.
 - `CallAbi` (`Auto`, `Cdecl`, `Stdcall`, `Thiscall`, `Fastcall`) and
   `CallOptions` with ABI, Linux main-thread selection, and Wine safe points.
 - Structured `Error` with `Open`, `ReadOnly`, `TargetExited`, `Unsupported`,
@@ -47,9 +50,10 @@ All notable changes to `memdiver-call` are documented here. The format follows
 - No ARM64, Linux `x86`, cross-bitness, or WOW64 support.
 - No floating-point/SIMD/struct/variadic arguments and no general remote
   allocation.
-- Native-Linux-to-Wine calls support only 32-bit arguments, not `call_export`
-  (PE exports are unavailable to `memdiver` on Linux), and only the main
-  thread; a safe point is required whenever the thread is not stopped in
-  32-bit code.
+- Native-Linux-to-Wine calls do not support `call_export` (PE exports are
+  unavailable to `memdiver` on Linux) and only support the main thread; a safe
+  point is required whenever the thread is not stopped in 32-bit code.
+- 64-bit arguments are supported only in stack positions; the `thiscall`
+  `this` and the two `fastcall` register arguments must be 32-bit.
 - Native Windows CFG/CET behaviour is not verified by this release's local
   tests; native Windows CI is configured for it.

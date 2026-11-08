@@ -31,6 +31,7 @@ use crate::debug;
 use crate::error::{CallOutcome, CallStatus, SysError};
 use crate::frame_x86::{self, FrameLayout, STACK_HEADROOM};
 use crate::linux::{self, DebugState, FpState};
+use crate::x86_args::{self, X86Abi, X86Error};
 use crate::{Failures, MAX_ARGUMENTS};
 
 /// `CS` value while executing 32-bit compatibility-mode code.
@@ -73,6 +74,23 @@ impl WineTarget {
     }
 }
 
+/// One call request on a 32-bit Windows PE under Wine.
+#[derive(Clone, Copy, Debug)]
+pub struct CallSpec<'a> {
+    /// Function address in the 32-bit Windows address space.
+    pub function: u64,
+    /// Argument values, one per declared argument.
+    pub args: &'a [u64],
+    /// Calling convention.
+    pub abi: WineAbi,
+    /// Indices in `args` that are 64-bit and occupy two stack slots.
+    pub wide_arguments: &'a [usize],
+    /// Optional safe-point instruction address in 32-bit code.
+    pub safe_point: Option<u64>,
+    /// Bound on the safe-point wait, not on the call itself.
+    pub timeout: Duration,
+}
+
 /// Waits for and attaches to a Wine process.
 ///
 /// The returned value is a guard: dropping it without calling
@@ -93,18 +111,11 @@ impl Attached {
     /// the return. When it is `None`, the call is only made if the initial
     /// stop is already in 32-bit mode.
     ///
-    /// `timeout` bounds the safe-point wait, not the call itself.
-    pub fn call(
-        mut self,
-        process: &Process,
-        function: u64,
-        args: &[u64],
-        abi: WineAbi,
-        safe_point: Option<u64>,
-        timeout: Duration,
-    ) -> CallOutcome {
+    /// The request's `timeout` bounds the safe-point wait, not the call
+    /// itself.
+    pub fn call(mut self, process: &Process, spec: &CallSpec<'_>) -> CallOutcome {
         self.armed = false;
-        run(self.tid, process, function, args, abi, safe_point, timeout)
+        run(self.tid, process, spec)
     }
 
     /// Detaches without running a call.
@@ -236,45 +247,48 @@ pub fn detect(process: &Process) -> Result<WineTarget, SysError> {
     })
 }
 
-/// Saved argument placement for a 32-bit Windows call.
-#[derive(Debug)]
-struct ArgumentLayout {
-    ecx: Option<u32>,
-    edx: Option<u32>,
-    stack: Vec<u32>,
+/// Maps the public calling convention to the internal 32-bit layout.
+fn x86_abi(abi: WineAbi) -> X86Abi {
+    match abi {
+        WineAbi::Cdecl => X86Abi::Cdecl,
+        WineAbi::Stdcall => X86Abi::Stdcall,
+        WineAbi::Thiscall => X86Abi::Thiscall,
+        WineAbi::Fastcall => X86Abi::Fastcall,
+    }
 }
 
-/// Splits arguments into register and stack slots for `abi`.
-fn layout_arguments(abi: WineAbi, args: &[u32]) -> ArgumentLayout {
-    match abi {
-        WineAbi::Cdecl | WineAbi::Stdcall => ArgumentLayout {
-            ecx: None,
-            edx: None,
-            stack: args.to_vec(),
+/// Maps a 32-bit argument-layout failure to a mechanism error.
+fn map_x86_error(error: X86Error) -> SysError {
+    match error {
+        X86Error::Index(index) => SysError::InvalidArgument {
+            index,
+            reason: "the wide-argument index is out of range",
         },
-        WineAbi::Thiscall => ArgumentLayout {
-            ecx: args.first().copied(),
-            edx: None,
-            stack: args.get(1..).unwrap_or(&[]).to_vec(),
+        X86Error::Duplicate(index) => SysError::InvalidArgument {
+            index,
+            reason: "the wide-argument index is repeated",
         },
-        WineAbi::Fastcall => ArgumentLayout {
-            ecx: args.first().copied(),
-            edx: args.get(1).copied(),
-            stack: args.get(2..).unwrap_or(&[]).to_vec(),
+        X86Error::NarrowValue(index) => SysError::InvalidArgument {
+            index,
+            reason: "the value does not fit in a 32-bit argument slot",
+        },
+        X86Error::WideRegister => SysError::Unsupported {
+            operation: "remote call",
+            reason: "64-bit register arguments are not supported; only stack arguments may be wide",
         },
     }
 }
 
 /// Runs a call on a stopped Wine thread and always attempts restore/detach.
-fn run(
-    tid: libc::pid_t,
-    process: &Process,
-    function: u64,
-    args: &[u64],
-    abi: WineAbi,
-    safe_point: Option<u64>,
-    timeout: Duration,
-) -> CallOutcome {
+fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome {
+    let CallSpec {
+        function,
+        args,
+        abi,
+        wide_arguments,
+        safe_point,
+        timeout,
+    } = *spec;
     if args.len() > MAX_ARGUMENTS {
         return CallOutcome {
             result: Err(SysError::InvalidArgument {
@@ -284,17 +298,15 @@ fn run(
             cleanup: linux::detach(tid).err(),
         };
     }
-    for (index, argument) in args.iter().enumerate() {
-        if *argument > u64::from(u32::MAX) {
+    let arguments = match x86_args::build(x86_abi(abi), args, wide_arguments) {
+        Ok(layout) => layout,
+        Err(error) => {
             return CallOutcome {
-                result: Err(SysError::InvalidArgument {
-                    index,
-                    reason: "the value does not fit in a 32-bit argument slot",
-                }),
+                result: Err(map_x86_error(error)),
                 cleanup: linux::detach(tid).err(),
             };
         }
-    }
+    };
     if function > u64::from(u32::MAX) {
         return CallOutcome {
             result: Err(SysError::InvalidAddress {
@@ -485,8 +497,6 @@ fn run(
         return fail_state(tid, &base, &fp, &debug, error);
     }
 
-    let narrow: Vec<u32> = args.iter().map(|argument| *argument as u32).collect();
-    let arguments = layout_arguments(abi, &narrow);
     let frame = match frame_x86::layout(base.rsp, arguments.stack.len()) {
         Some(frame) => frame,
         None => {
@@ -780,56 +790,4 @@ fn ensure_frame(process: &Process, layout: FrameLayout) -> Result<(), SysError> 
         });
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cdecl_puts_every_argument_on_the_stack() {
-        let layout = layout_arguments(WineAbi::Cdecl, &[1, 2, 3]);
-        assert_eq!(layout.ecx, None);
-        assert_eq!(layout.edx, None);
-        assert_eq!(layout.stack, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn stdcall_puts_every_argument_on_the_stack() {
-        let layout = layout_arguments(WineAbi::Stdcall, &[7]);
-        assert_eq!(layout.ecx, None);
-        assert_eq!(layout.stack, vec![7]);
-    }
-
-    #[test]
-    fn thiscall_takes_this_from_ecx() {
-        let layout = layout_arguments(WineAbi::Thiscall, &[0xAA, 1, 2]);
-        assert_eq!(layout.ecx, Some(0xAA));
-        assert_eq!(layout.edx, None);
-        assert_eq!(layout.stack, vec![1, 2]);
-    }
-
-    #[test]
-    fn fastcall_uses_both_register_arguments() {
-        let layout = layout_arguments(WineAbi::Fastcall, &[0x11, 0x22, 3, 4]);
-        assert_eq!(layout.ecx, Some(0x11));
-        assert_eq!(layout.edx, Some(0x22));
-        assert_eq!(layout.stack, vec![3, 4]);
-    }
-
-    #[test]
-    fn six_stack_arguments_fit_the_frame() {
-        let layout = layout_arguments(WineAbi::Cdecl, &[1, 2, 3, 4, 5, 6]);
-        let frame = frame_x86::layout(0x0036_feb8, layout.stack.len()).expect("frame");
-        assert_eq!(frame.frame % 16, 12);
-        assert_eq!(frame.end, frame.frame + 4 + 24);
-    }
-
-    #[test]
-    fn fastcall_with_one_argument_leaves_edx_unset() {
-        let layout = layout_arguments(WineAbi::Fastcall, &[9]);
-        assert_eq!(layout.ecx, Some(9));
-        assert_eq!(layout.edx, None);
-        assert!(layout.stack.is_empty());
-    }
 }

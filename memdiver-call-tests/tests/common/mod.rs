@@ -36,6 +36,18 @@ pub(crate) struct Fixture {
     /// Address of `fixture_thiscall_add` (Windows `x86` only).
     #[cfg(all(windows, target_arch = "x86"))]
     pub(crate) thiscall: u64,
+    /// Address of `fixture_add64` (Windows `x86` only).
+    #[cfg(all(windows, target_arch = "x86"))]
+    pub(crate) add64: u64,
+    /// Address of `fixture_mix64` (Windows `x86` only).
+    #[cfg(all(windows, target_arch = "x86"))]
+    pub(crate) mix64: u64,
+    /// Address of `fixture_stdcall64` (Windows `x86` only).
+    #[cfg(all(windows, target_arch = "x86"))]
+    pub(crate) stdcall64: u64,
+    /// Address of `fixture_thiscall64` (Windows `x86` only).
+    #[cfg(all(windows, target_arch = "x86"))]
+    pub(crate) thiscall64: u64,
 }
 
 impl Fixture {
@@ -89,6 +101,14 @@ impl Fixture {
             fastcall: number("fastcall"),
             #[cfg(all(windows, target_arch = "x86"))]
             thiscall: number("thiscall"),
+            #[cfg(all(windows, target_arch = "x86"))]
+            add64: number("add64"),
+            #[cfg(all(windows, target_arch = "x86"))]
+            mix64: number("mix64"),
+            #[cfg(all(windows, target_arch = "x86"))]
+            stdcall64: number("stdcall64"),
+            #[cfg(all(windows, target_arch = "x86"))]
+            thiscall64: number("thiscall64"),
         };
         assert_eq!(fixture.pid(), pid, "Child::id must match the printed pid");
         fixture

@@ -35,6 +35,8 @@ mod frame;
 mod frame_x86;
 #[cfg(any(windows, test))]
 mod stub;
+#[cfg(any(target_arch = "x86", target_os = "linux", test))]
+mod x86_args;
 
 #[cfg(target_os = "linux")]
 mod linux;

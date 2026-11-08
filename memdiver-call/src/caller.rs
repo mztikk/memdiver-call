@@ -154,6 +154,10 @@ impl RemoteCaller {
     /// a lock held by a thread that is stopped. Use it only on processes you
     /// own or are explicitly authorized to inspect.
     ///
+    /// On a 32-bit `x86` target (native Windows `x86` or a Wine 32-bit PE),
+    /// [`CallOptions::with_wide_arguments`] marks arguments that occupy two
+    /// 32-bit stack slots; unlisted arguments must fit in 32 bits.
+    ///
     /// On a Wine 32-bit target, [`CallOptions::with_safe_point`] waits for the
     /// target's main thread to reach a chosen 32-bit instruction before
     /// redirecting it. Without a safe point the call only proceeds when the
@@ -276,13 +280,23 @@ impl RemoteCaller {
                     reason: "the address does not fit in a 32-bit target",
                 });
             }
+            let wide = wide_flags(args.len(), options)?;
             for (index, argument) in args.iter().enumerate() {
-                if *argument > u64::from(u32::MAX) {
+                if !wide[index] && *argument > u64::from(u32::MAX) {
                     return Err(Error::InvalidArgument {
                         index,
                         reason: "the value does not fit in a 32-bit argument slot",
                     });
                 }
+            }
+        }
+        #[cfg(not(target_arch = "x86"))]
+        {
+            if !options.wide_arguments().is_empty() {
+                return Err(Error::Unsupported {
+                    operation: "call",
+                    reason: "64-bit argument specifications only apply to 32-bit x86 targets",
+                });
             }
         }
         self.require_executable(function)
@@ -307,8 +321,9 @@ impl RemoteCaller {
                 reason: "the address does not fit in a 32-bit target",
             });
         }
+        let wide = wide_flags(args.len(), options)?;
         for (index, argument) in args.iter().enumerate() {
-            if *argument > u64::from(u32::MAX) {
+            if !wide[index] && *argument > u64::from(u32::MAX) {
                 return Err(Error::InvalidArgument {
                     index,
                     reason: "the value does not fit in a 32-bit argument slot",
@@ -555,6 +570,7 @@ fn call_pinned(
         function.get(),
         args,
         sys_abi(options.abi()),
+        options.wide_arguments(),
     );
     finish(function, pid, outcome)
 }
@@ -612,14 +628,15 @@ fn wine32_call(
             pid,
         ));
     }
-    let outcome = attached.call(
-        &caller.process,
-        function.get(),
+    let spec = memdiver_call_sys::wine32::CallSpec {
+        function: function.get(),
         args,
-        wine_abi(options.abi()),
-        options.safe_point().map(Address::get),
-        options.safe_point_timeout(),
-    );
+        abi: wine_abi(options.abi()),
+        wide_arguments: options.wide_arguments(),
+        safe_point: options.safe_point().map(Address::get),
+        timeout: options.safe_point_timeout(),
+    };
+    let outcome = attached.call(&caller.process, &spec);
     finish(function, pid, outcome)
 }
 
@@ -664,6 +681,27 @@ fn check_bitness(process: &Process) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+/// Builds the per-argument wide flag, validating the declared indices.
+fn wide_flags(argument_count: usize, options: &CallOptions) -> Result<Vec<bool>, Error> {
+    let mut wide = vec![false; argument_count];
+    for &index in options.wide_arguments() {
+        let Some(slot) = wide.get_mut(index) else {
+            return Err(Error::InvalidArgument {
+                index,
+                reason: "the wide-argument index is out of range",
+            });
+        };
+        if *slot {
+            return Err(Error::InvalidArgument {
+                index,
+                reason: "the wide-argument index is repeated",
+            });
+        }
+        *slot = true;
+    }
+    Ok(wide)
 }
 
 /// Validates the ABI and thread selection before any operating-system call.

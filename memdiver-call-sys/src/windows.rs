@@ -23,9 +23,11 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::error::{CallOutcome, CallStatus, OsFailure, SysError};
-#[cfg(any(target_arch = "x86", test))]
-use crate::stub::X86Abi;
 use crate::stub::{self, GeneratedStub};
+#[cfg(all(test, target_arch = "x86_64"))]
+use crate::x86_args::X86Abi;
+#[cfg(target_arch = "x86")]
+use crate::x86_args::{self, X86Abi, X86Error};
 use crate::{Failures, MAX_ARGUMENTS};
 
 /// The calling convention of a Windows call.
@@ -121,9 +123,10 @@ pub fn call(
     function: u64,
     args: &[u64],
     abi: Abi,
+    wide_arguments: &[usize],
 ) -> CallOutcome {
     let mut state = RemoteState::new(execution.raw() as HANDLE, page_size());
-    let result = call_inner(&mut state, process, function, args, abi);
+    let result = call_inner(&mut state, process, function, args, abi, wide_arguments);
     let cleanup = state.cleanup();
     CallOutcome { result, cleanup }
 }
@@ -359,6 +362,7 @@ fn call_inner(
     function: u64,
     args: &[u64],
     abi: Abi,
+    wide_arguments: &[usize],
 ) -> Result<u64, SysError> {
     if args.len() > MAX_ARGUMENTS {
         return Err(SysError::InvalidArgument {
@@ -367,19 +371,36 @@ fn call_inner(
         });
     }
     #[cfg(target_arch = "x86_64")]
-    if abi != Abi::Auto {
-        return Err(SysError::Unsupported {
-            operation: "remote call",
-            reason: "only the platform default ABI is supported on x86_64",
-        });
+    {
+        if abi != Abi::Auto {
+            return Err(SysError::Unsupported {
+                operation: "remote call",
+                reason: "only the platform default ABI is supported on x86_64",
+            });
+        }
+        if !wide_arguments.is_empty() {
+            return Err(SysError::Unsupported {
+                operation: "remote call",
+                reason: "64-bit argument specifications only apply to 32-bit x86 targets",
+            });
+        }
     }
+    #[cfg(target_arch = "x86")]
+    let _ = wide_arguments;
 
     let stub_address = state.allocate_near(function)?;
     state.stub = Some(stub_address);
     let result_address = state.allocate_any()?;
     state.result = Some(result_address);
 
-    let generated = generate(stub_address, function, result_address, args, abi)?;
+    let generated = generate(
+        stub_address,
+        function,
+        result_address,
+        args,
+        abi,
+        wide_arguments,
+    )?;
     process
         .write(Address::new(stub_address as u64), &generated.bytes)
         .map_err(inspect("Process::write"))?;
@@ -410,6 +431,7 @@ fn generate(
     result: usize,
     args: &[u64],
     _abi: Abi,
+    _wide_arguments: &[usize],
 ) -> Result<GeneratedStub, SysError> {
     Ok(stub::build_x64(
         stub_address as u64,
@@ -427,6 +449,7 @@ fn generate(
     result: usize,
     args: &[u64],
     abi: Abi,
+    wide_arguments: &[usize],
 ) -> Result<GeneratedStub, SysError> {
     let function = u32::try_from(function).map_err(|_| SysError::InvalidAddress {
         address: function,
@@ -441,20 +464,36 @@ fn generate(
         reason: "the result address does not fit in a 32-bit target",
     })?;
 
-    let mut narrow = [0u32; MAX_ARGUMENTS];
-    for (index, argument) in args.iter().enumerate() {
-        narrow[index] = u32::try_from(*argument).map_err(|_| SysError::InvalidArgument {
-            index,
-            reason: "the value does not fit in a 32-bit argument slot",
-        })?;
-    }
+    let layout = x86_args::build(map_abi(abi), args, wide_arguments).map_err(map_x86_error)?;
     Ok(stub::build_x86(
         stub_address,
         function,
         result_address,
-        map_abi(abi),
-        &narrow[..args.len()],
+        &layout,
     ))
+}
+
+/// Maps a 32-bit argument-layout failure to a mechanism error.
+#[cfg(target_arch = "x86")]
+fn map_x86_error(error: X86Error) -> SysError {
+    match error {
+        X86Error::Index(index) => SysError::InvalidArgument {
+            index,
+            reason: "the wide-argument index is out of range",
+        },
+        X86Error::Duplicate(index) => SysError::InvalidArgument {
+            index,
+            reason: "the wide-argument index is repeated",
+        },
+        X86Error::NarrowValue(index) => SysError::InvalidArgument {
+            index,
+            reason: "the value does not fit in a 32-bit argument slot",
+        },
+        X86Error::WideRegister => SysError::Unsupported {
+            operation: "remote call",
+            reason: "64-bit register arguments are not supported; only stack arguments may be wide",
+        },
+    }
 }
 
 /// Maps the public ABI to the 32-bit calling conventions.

@@ -6,21 +6,10 @@
 //! bytes rather than copied from a compiled function: relocating compiled code
 //! is not a valid stub strategy.
 
+#[cfg(any(target_arch = "x86_64", test))]
 use crate::MAX_ARGUMENTS;
-
-/// The calling convention of a 32-bit Windows call.
 #[cfg(any(target_arch = "x86", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum X86Abi {
-    /// Caller cleans the stack; all arguments are on the stack.
-    Cdecl,
-    /// Callee cleans the stack; all arguments are on the stack.
-    Stdcall,
-    /// `this` in `ECX`, remaining arguments on the stack.
-    Thiscall,
-    /// First two arguments in `ECX`/`EDX`, remaining arguments on the stack.
-    Fastcall,
-}
+use crate::x86_args::X86Layout;
 
 /// A generated stub and the encoding chosen for its call instruction.
 #[derive(Debug)]
@@ -130,16 +119,9 @@ pub(crate) fn build_x86(
     stub_address: u32,
     function: u32,
     result: u32,
-    abi: X86Abi,
-    args: &[u32],
+    layout: &X86Layout,
 ) -> GeneratedStub {
-    debug_assert!(args.len() <= MAX_ARGUMENTS);
-
-    let stack_arguments: &[u32] = match abi {
-        X86Abi::Cdecl | X86Abi::Stdcall => args,
-        X86Abi::Thiscall => args.get(1..).unwrap_or(&[]),
-        X86Abi::Fastcall => args.get(2..).unwrap_or(&[]),
-    };
+    debug_assert!(layout.stack.len() <= 12);
 
     let mut bytes = Vec::with_capacity(96);
     // push ebp; mov ebp, esp; and esp, -16
@@ -147,27 +129,24 @@ pub(crate) fn build_x86(
 
     // Reserve a 16-byte-aligned argument area. `and esp, -16` already
     // aligned ESP, so a multiple-of-16 reservation keeps it aligned.
-    let stack_bytes = stack_arguments.len() * 4;
+    let stack_bytes = layout.stack.len() * 4;
     let reservation = (stack_bytes + 15) & !15;
     if reservation > 0 {
         bytes.extend_from_slice(&[0x83, 0xEC, reservation as u8]); // sub esp, imm8
     }
-    for (index, value) in stack_arguments.iter().enumerate() {
+    for (index, value) in layout.stack.iter().enumerate() {
         // mov dword ptr [esp + 4*index], imm32
         bytes.extend_from_slice(&[0xC7, 0x44, 0x24, (index * 4) as u8]);
         bytes.extend_from_slice(&value.to_le_bytes());
     }
 
-    match abi {
-        X86Abi::Thiscall | X86Abi::Fastcall => {
-            bytes.push(0xB9); // mov ecx, imm32
-            bytes.extend_from_slice(&argument(args, 0).to_le_bytes());
-        }
-        X86Abi::Cdecl | X86Abi::Stdcall => {}
+    if let Some(value) = layout.ecx {
+        bytes.push(0xB9); // mov ecx, imm32
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
-    if abi == X86Abi::Fastcall {
+    if let Some(value) = layout.edx {
         bytes.push(0xBA); // mov edx, imm32
-        bytes.extend_from_slice(&argument(args, 1).to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
 
     let call_offset = bytes.len();
@@ -204,6 +183,7 @@ pub(crate) fn build_x86(
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn argument<T: Copy + Default>(args: &[T], index: usize) -> T {
     args.get(index).copied().unwrap_or_default()
 }
@@ -307,15 +287,16 @@ mod tests {
         );
     }
 
+    use crate::x86_args::{self, X86Abi};
+
+    fn x86_layout(abi: X86Abi, values: &[u64]) -> crate::x86_args::X86Layout {
+        x86_args::build(abi, values, &[]).expect("layout")
+    }
+
     #[test]
     fn x86_cdecl_six_arguments_is_byte_exact() {
-        let stub = build_x86(
-            0x0040_0000,
-            0x0040_1000,
-            0x0050_0000,
-            X86Abi::Cdecl,
-            &[1, 2, 3, 4, 5, 6],
-        );
+        let layout = x86_layout(X86Abi::Cdecl, &[1, 2, 3, 4, 5, 6]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let expected: &[u8] = &[
             // push ebp; mov ebp, esp; and esp, -16; sub esp, 32
             0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x20, //
@@ -343,13 +324,8 @@ mod tests {
 
     #[test]
     fn x86_thiscall_puts_this_in_ecx() {
-        let stub = build_x86(
-            0x0040_0000,
-            0x0040_1000,
-            0x0050_0000,
-            X86Abi::Thiscall,
-            &[0xAA, 1, 2],
-        );
+        let layout = x86_layout(X86Abi::Thiscall, &[0xAA, 1, 2]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
         // Two stack arguments (1, 2), reservation of 16.
         assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
@@ -363,13 +339,8 @@ mod tests {
 
     #[test]
     fn x86_fastcall_puts_two_arguments_in_registers() {
-        let stub = build_x86(
-            0x0040_0000,
-            0x0040_1000,
-            0x0050_0000,
-            X86Abi::Fastcall,
-            &[0x11, 0x22, 0x33],
-        );
+        let layout = x86_layout(X86Abi::Fastcall, &[0x11, 0x22, 0x33]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
         assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
         // Only argument 3 is on the stack.
@@ -380,14 +351,24 @@ mod tests {
     }
 
     #[test]
+    fn x86_wide_argument_uses_two_stack_slots() {
+        let layout = x86_args::build(X86Abi::Cdecl, &[0x1_0000_0003, 0x2], &[0]).expect("layout");
+        assert_eq!(layout.stack, vec![3, 1, 2]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
+        let bytes = &stub.bytes;
+        assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
+        assert_eq!(&bytes[9..13], &[0xC7, 0x44, 0x24, 0x00]);
+        assert_eq!(&bytes[13..17], &3u32.to_le_bytes());
+        assert_eq!(&bytes[17..21], &[0xC7, 0x44, 0x24, 0x04]);
+        assert_eq!(&bytes[21..25], &1u32.to_le_bytes());
+        assert_eq!(&bytes[25..29], &[0xC7, 0x44, 0x24, 0x08]);
+        assert_eq!(&bytes[29..33], &2u32.to_le_bytes());
+    }
+
+    #[test]
     fn x86_stdcall_uses_the_stack_like_cdecl() {
-        let stub = build_x86(
-            0x0040_0000,
-            0x0040_1000,
-            0x0050_0000,
-            X86Abi::Stdcall,
-            &[7, 8],
-        );
+        let layout = x86_layout(X86Abi::Stdcall, &[7, 8]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
         assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
         assert_eq!(&bytes[9..17], &[0xC7, 0x44, 0x24, 0x00, 7, 0, 0, 0]);
@@ -398,7 +379,8 @@ mod tests {
 
     #[test]
     fn x86_no_stack_arguments_skips_reservation() {
-        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, X86Abi::Cdecl, &[]);
+        let layout = x86_layout(X86Abi::Cdecl, &[]);
+        let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         assert_eq!(
             &stub.bytes[..9],
             &[0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0, 0xE8, 0xF5, 0x0F]
@@ -407,7 +389,8 @@ mod tests {
 
     #[test]
     fn x86_uses_an_indirect_call_when_out_of_range() {
-        let stub = build_x86(0x0040_0000, 0xF000_0000, 0x0050_0000, X86Abi::Cdecl, &[1]);
+        let layout = x86_layout(X86Abi::Cdecl, &[1]);
+        let stub = build_x86(0x0040_0000, 0xF000_0000, 0x0050_0000, &layout);
         assert!(!stub.direct_call);
         // 6-byte prefix, 3-byte reservation, 8-byte argument store.
         let call = &stub.bytes[17..];

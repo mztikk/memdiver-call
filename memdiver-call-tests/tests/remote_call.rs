@@ -357,6 +357,87 @@ fn x86_calling_conventions_dispatch_correctly() {
     fixture.ping();
 }
 
+#[cfg(all(windows, target_arch = "x86"))]
+#[test]
+fn x86_wide_arguments_use_two_stack_slots() {
+    let mut fixture = Fixture::spawn();
+    let caller = open(&fixture);
+
+    let a = 0x1_0000_0003u64;
+    let b = 0x2_0000_0005u64;
+    let options = CallOptions::new().with_wide_arguments(&[0, 1]);
+    assert_eq!(
+        caller
+            .call(Address::new(fixture.add64), &[a, b], &options)
+            .expect("add64"),
+        a.wrapping_add(b)
+    );
+
+    let a32 = 7u32;
+    let b64 = 0x1_0000_0009u64;
+    let c32 = 0xAAAAu32;
+    let d64 = 0x2_0000_000Bu64;
+    let expected =
+        u64::from(a32) ^ b64.wrapping_mul(3) ^ (u64::from(c32) << 32) ^ d64.wrapping_mul(5);
+    let options = CallOptions::new().with_wide_arguments(&[1, 3]);
+    assert_eq!(
+        caller
+            .call(
+                Address::new(fixture.mix64),
+                &[u64::from(a32), b64, u64::from(c32), d64],
+                &options,
+            )
+            .expect("mix64"),
+        expected
+    );
+
+    let options = CallOptions::new()
+        .with_wide_arguments(&[0, 1])
+        .with_abi(CallAbi::Stdcall);
+    assert_eq!(
+        caller
+            .call(Address::new(fixture.stdcall64), &[10, 20], &options)
+            .expect("stdcall64"),
+        30
+    );
+
+    let transport = 0x1122_3344_5566_7788u64;
+    let seat = 7u32;
+    let expected = u64::from(100u32) ^ transport ^ (u64::from(seat) << 32);
+    let options = CallOptions::new()
+        .with_wide_arguments(&[1])
+        .with_abi(CallAbi::Thiscall);
+    assert_eq!(
+        caller
+            .call(
+                Address::new(fixture.thiscall64),
+                &[100, transport, u64::from(seat)],
+                &options,
+            )
+            .expect("thiscall64"),
+        expected
+    );
+    fixture.ping();
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn wide_arguments_are_unsupported_on_64_bit_targets() {
+    let fixture = Fixture::spawn();
+    let caller = open(&fixture);
+    let error = caller
+        .call(
+            Address::new(fixture.add),
+            &[2, 3],
+            &CallOptions::new().with_wide_arguments(&[0]),
+        )
+        .expect_err("wide arguments on 64-bit");
+    assert!(
+        matches!(error, Error::Unsupported { .. }),
+        "unexpected error: {error:?}"
+    );
+}
+
 #[test]
 fn remote_caller_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}

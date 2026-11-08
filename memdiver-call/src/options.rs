@@ -38,6 +38,7 @@ pub enum CallAbi {
 pub struct CallOptions {
     abi: CallAbi,
     thread: Option<u32>,
+    wide_arguments: Vec<usize>,
     safe_point: Option<Address>,
     safe_point_timeout: Duration,
 }
@@ -66,6 +67,23 @@ impl CallOptions {
     #[must_use]
     pub fn with_thread(mut self, tid: u32) -> Self {
         self.thread = Some(tid);
+        self
+    }
+
+    /// Declares which arguments are 64-bit.
+    ///
+    /// This applies only to 32-bit `x86` targets: native Windows `x86` and a
+    /// 32-bit Windows PE under Wine. Each listed argument occupies two 32-bit
+    /// stack slots, low-order first, as the Microsoft x86 ABI requires; this is
+    /// how a function with a `uint64_t` parameter is called. Unlisted
+    /// arguments must fit in 32 bits.
+    ///
+    /// Register arguments cannot be wide: the `thiscall` `this` value and the
+    /// two `fastcall` register arguments must be 32-bit. A list on any other
+    /// target returns [`crate::Error::Unsupported`].
+    #[must_use]
+    pub fn with_wide_arguments(mut self, indices: &[usize]) -> Self {
+        self.wide_arguments = indices.to_vec();
         self
     }
 
@@ -109,6 +127,12 @@ impl CallOptions {
         self.thread
     }
 
+    /// Returns the arguments declared as 64-bit.
+    #[must_use]
+    pub fn wide_arguments(&self) -> &[usize] {
+        &self.wide_arguments
+    }
+
     /// Returns the selected safe point, if any.
     #[must_use]
     pub fn safe_point(&self) -> Option<Address> {
@@ -127,6 +151,7 @@ impl Default for CallOptions {
         Self {
             abi: CallAbi::Auto,
             thread: None,
+            wide_arguments: Vec::new(),
             safe_point: None,
             safe_point_timeout: DEFAULT_SAFE_POINT_TIMEOUT,
         }
@@ -142,6 +167,7 @@ mod tests {
         let options = CallOptions::new();
         assert_eq!(options.abi(), CallAbi::Auto);
         assert_eq!(options.thread(), None);
+        assert!(options.wide_arguments().is_empty());
         assert_eq!(options.safe_point(), None);
         assert_eq!(options.safe_point_timeout(), DEFAULT_SAFE_POINT_TIMEOUT);
         assert_eq!(CallAbi::default(), CallAbi::Auto);
@@ -153,6 +179,13 @@ mod tests {
         assert_eq!(options.abi(), CallAbi::Stdcall);
         assert_eq!(options.thread(), Some(7));
         assert_eq!(CallOptions::new().with_thread(7).abi(), CallAbi::Auto);
+    }
+
+    #[test]
+    fn wide_arguments_are_configurable() {
+        let options = CallOptions::new().with_wide_arguments(&[1, 3]);
+        assert_eq!(options.wide_arguments(), &[1, 3]);
+        assert!(CallOptions::new().wide_arguments().is_empty());
     }
 
     #[test]

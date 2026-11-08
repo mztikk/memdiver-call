@@ -65,12 +65,12 @@ except for the explicit native-Linux-to-Wine-`x86` mode below.
 | Capability | |
 |---|:---:|
 | `RemoteCaller::open_wine` / `new_wine` | yes |
-| `call` with 0–6 arguments, each fitting in 32 bits | yes |
+| `call` with 0–6 arguments | yes |
+| 32-bit arguments and 64-bit stack arguments | yes (`with_wide_arguments`) |
 | `cdecl` / `stdcall` / `thiscall` / `fastcall` | yes |
 | `u64` result (`EDX:EAX`) | yes |
 | `with_safe_point` | yes; required whenever the thread stop is not already in 32-bit mode |
 | `with_thread` beyond the main thread | no |
-| 64-bit arguments | no |
 | `call_export` | no; pass the function address |
 | Host | Linux `x86_64` only |
 
@@ -78,10 +78,12 @@ except for the explicit native-Linux-to-Wine-`x86` mode below.
 
 The generated 32-bit stub stores `EDX:EAX` as the `u64` result. For a function
 that returns a 32-bit integer, only the low 32 bits are meaningful; use the low
-half. A function returning a 64-bit integer uses the full value. Calls that
-need to pass a 64-bit argument are not supported on `x86`; each argument slot
-must fit in 32 bits and larger values are rejected with
-`Error::InvalidArgument`.
+half. A function returning a 64-bit integer uses the full value.
+
+On a 32-bit target, a 64-bit argument occupies two 32-bit stack slots, low word
+first, and is declared with `CallOptions::with_wide_arguments`. Register
+arguments — the `thiscall` `this` and the two `fastcall` registers — must be
+32-bit; a wide register argument is rejected with `Error::Unsupported`.
 
 ## Calling a 32-bit Windows process under Wine
 
@@ -100,6 +102,24 @@ let options = CallOptions::new()
     .with_abi(CallAbi::Thiscall);
 let result = caller.call(Address::new(function), &[this, event_time], &options)?;
 ```
+
+A function with a 64-bit argument, such as a movement update carrying a
+`uint64_t` transport and a `uint8_t` seat, declares the wide slot:
+
+```rust
+let options = CallOptions::new()
+    .with_safe_point(Address::new(swap_buffers_return))
+    .with_wide_arguments(&[1]) // args[1] is the uint64_t transport
+    .with_abi(CallAbi::Thiscall);
+let result = caller.call(
+    Address::new(send_movement_update),
+    &[this, transport, seat],
+    &options,
+)?;
+```
+
+The index is the position in `args`, including `this`. A 64-bit return value
+uses `EDX:EAX`; a 32-bit return only needs the low half.
 
 **The PID must be the process that hosts the PE**, not the `wine` launcher.
 Its Linux command line contains the `.exe` path (for example
@@ -127,8 +147,11 @@ useful for tests and simple targets, not for a live game main thread.
 
 ### Wine-specific limitations
 
-- Arguments are 32-bit; a slot above `u32::MAX` is rejected. 64-bit arguments
-  would need two stack slots and are not supported yet.
+- Arguments are 32-bit unless declared wide with
+  `CallOptions::with_wide_arguments`. A wide argument occupies two stack slots
+  (low word first), as the Microsoft x86 ABI requires. Register arguments (the
+  `thiscall` `this` and the two `fastcall` registers) must be 32-bit; a wide
+  register argument is rejected. Up to six declared arguments are accepted.
 - `call_export` returns `Error::Unsupported`; PE exports are not available to
   `memdiver` on Linux. Pass the function address.
 - The called function runs on the game's main thread with its TEB, locks, and
@@ -216,9 +239,10 @@ Use this only on processes you own or are explicitly authorized to inspect.
 * **No general remote allocation** or string/struct marshalling.
 * **The call is synchronous** and runs to completion; there is no
   `RemoteCall` handle.
-* **Wine 32-bit targets**: no 64-bit arguments, no `call_export`, only the main
-  thread, and a safe point is required whenever the thread is not stopped in
-  32-bit code. Safe-point waiting is bounded; the call is not.
+* **Wine 32-bit targets**: 64-bit arguments only in stack positions, no
+  `call_export`, only the main thread, and a safe point is required whenever
+  the thread is not stopped in 32-bit code. Safe-point waiting is bounded; the
+  call is not.
 * **Signals:** non-breakpoint signals received by the traced Linux thread
   during a call are forwarded, and the call fails if the target dies. A signal
   storm is bounded and fails the call rather than hanging.

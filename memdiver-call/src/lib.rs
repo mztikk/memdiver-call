@@ -57,11 +57,16 @@
 //!   breakpoint there, bounded by
 //!   [`CallOptions::with_safe_point_timeout`], and reuses the same breakpoint
 //!   for the return.
-//! * Arguments are 32-bit values: each `u64` slot must fit in 32 bits. The
-//!   result is `EDX:EAX`; for a 32-bit return value only the low half is
-//!   meaningful. All 32-bit conventions are available.
+//! * Arguments are 32-bit values unless declared wide with
+//!   [`CallOptions::with_wide_arguments`]; a wide argument occupies two stack
+//!   slots, low word first. Register arguments (the `thiscall` `this` and the
+//!   two `fastcall` registers) must be 32-bit. The result is `EDX:EAX`; for a
+//!   32-bit return value only the low half is meaningful. All 32-bit
+//!   conventions are available.
 //! * PE exports cannot be resolved by `memdiver` on Linux, so `call_export`
 //!   returns [`Error::Unsupported`]; pass the function address to `call`.
+//! * 64-bit arguments are supported in stack positions; 64-bit register
+//!   arguments are rejected.
 //! * C++ exceptions or `longjmp` unwinding through the synthetic frame are
 //!   unsupported. The call runs on the game's main thread under its locks and
 //!   thread-local state, which is the caller's risk.
