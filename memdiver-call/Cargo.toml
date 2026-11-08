@@ -1,0 +1,22 @@
+[package]
+name = "memdiver-call"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Call functions inside another local process on Linux and Windows"
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/memdiver-call"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+memdiver.workspace = true
+memdiver-call-sys.workspace = true
+
+[lints]
+workspace = true
