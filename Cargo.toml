@@ -1,0 +1,33 @@
+[workspace]
+members = ["memdiver-call", "memdiver-call-sys", "memdiver-call-tests"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["memdiver-call contributors"]
+description = "Call functions inside another local process on Linux and Windows"
+keywords = ["process", "memory", "remote-call", "windows", "linux"]
+categories = ["os", "api-bindings", "development-tools::debugging"]
+
+[workspace.dependencies]
+libc = "0.2"
+memdiver = "0.2"
+memdiver-call = { version = "0.1.0", path = "memdiver-call" }
+memdiver-call-sys = { version = "0.1.0", path = "memdiver-call-sys" }
+windows-sys = { version = "0.59", default-features = false }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
