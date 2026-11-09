@@ -15,7 +15,7 @@ categories = ["os", "api-bindings", "development-tools::debugging"]
 [workspace.dependencies]
 libc = "0.2"
 memdiver = "0.2"
-memdiver-call = { version = "0.1.0", path = "memdiver-call" }
+memdiver-call = { version = "0.1.1", path = "memdiver-call" }
 memdiver-call-sys = { version = "0.1.0", path = "memdiver-call-sys" }
 windows-sys = { version = "0.59", default-features = false }
 

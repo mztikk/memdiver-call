@@ -4,6 +4,14 @@ All notable changes to `memdiver-call` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-11-09
+
+### Changed
+
+- Documentation-only release: the README now records the crates.io release,
+  adds install and documentation links, and no longer claims the crate is
+  unpublished. No API or behaviour changes.
+
 ## [0.1.0] - 2026-11-08
 
 ### Added

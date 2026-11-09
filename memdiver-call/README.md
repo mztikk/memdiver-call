@@ -1,5 +1,13 @@
 # memdiver-call
 
+[![crates.io](https://img.shields.io/crates/v/memdiver-call.svg)](https://crates.io/crates/memdiver-call)
+[![docs.rs](https://docs.rs/memdiver-call/badge.svg)](https://docs.rs/memdiver-call)
+[![license](https://img.shields.io/crates/l/memdiver-call.svg)](#msrv-and-licensing)
+
+```sh
+cargo add memdiver-call
+```
+
 Call a function inside another local process on **Linux `x86_64`** and
 **Windows `x86_64` / `x86`**.
 
@@ -366,4 +374,10 @@ Rust 1.85 (edition 2024). Licensed under MIT OR Apache-2.0.
 
 ## Version
 
-`0.1.0` — the first release. It is not published to crates.io.
+`memdiver-call` 0.1.1 and `memdiver-call-sys` 0.1.0 are published on
+crates.io:
+
+* https://crates.io/crates/memdiver-call
+* https://crates.io/crates/memdiver-call-sys
+
+Documentation is built at <https://docs.rs/memdiver-call>.
