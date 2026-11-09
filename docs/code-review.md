@@ -824,4 +824,5 @@ The following were run on the final tree (Linux 7.3.3, stable Rust 1.99.1):
 * `cargo package --list --locked` for both published crates
 
 MSRV 1.85 was not re-run offline (the toolchain cannot be installed in this sandbox); CI
-runs it. Nothing was published to crates.io.
+runs it. The release was published as `memdiver-call` 0.2.0 and `memdiver-call-sys` 0.2.0 on
+crates.io, tagged `v0.2.0`.
