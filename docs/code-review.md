@@ -361,14 +361,15 @@ Several hazards that follow directly from the mechanism are not in the public li
 `memdiver-call-sys/src/windows.rs:96-113`, `memdiver-call/README.md:195-208`
 
 The execution handle is used for `VirtualAllocEx`, `VirtualProtectEx`,
-`FlushInstructionCache`, `CreateRemoteThread`, `VirtualFreeEx` and `CloseHandle`. That needs
-`PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION`; `PROCESS_QUERY_INFORMATION`,
-`PROCESS_VM_READ`, `PROCESS_VM_WRITE` and `PROCESS_SYNCHRONIZE` are unused on this handle
-(memory I/O uses the `memdiver` handle, and the wait/exit-code calls use the *thread*
-handle). Requesting them weakens the security posture for protected targets and contradicts
-the least-privilege spirit of the README. `PROCESS_QUERY_LIMITED_INFORMATION` would be the
-modern query right if one is needed. (The agent brief specified the six-right mask, so this
-is a design-level correction rather than an implementation slip.)
+`FlushInstructionCache`, `CreateRemoteThread`, `VirtualFreeEx` and `CloseHandle`. Microsoft
+documents `CreateRemoteThread` as requiring `PROCESS_CREATE_THREAD`,
+`PROCESS_QUERY_INFORMATION`, `PROCESS_VM_OPERATION`, `PROCESS_VM_WRITE` and
+`PROCESS_VM_READ`, so five of the six requested rights are justified by that call alone;
+only `PROCESS_SYNCHRONIZE` on the *process* handle is not needed (the wait and exit-code
+calls use the thread handle). **This finding was corrected after review**: the earlier claim
+that only `PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION` are required was wrong. The mask
+was left unchanged; dropping `PROCESS_SYNCHRONIZE` is optional. (The agent brief specified
+the six-right mask as well.)
 
 #### 15. CFG/IBT reasoning does not cover the stub entry
 `memdiver-call-sys/src/windows.rs:239-267`, `memdiver-call/README.md:234-239`
@@ -760,3 +761,67 @@ false success sample: 0x5   (the spin loop's previous return, not 42)
 
 That is a ~23 % silent-wrong-result rate when calling the function the thread is executing,
 and it is why finding 3b is listed as a P1.
+
+
+---
+
+## Resolution status
+
+All findings were worked through in the commits after the review baseline. This section
+records the disposition so the report can be read against the final tree.
+
+| Finding | Disposition |
+|---|---|
+| 1 region snapshots | **Fixed.** One `RegionMap` per validation phase and per sys backend; the Wine post-safe-point frame check uses a fresh snapshot. Release call cost on the 32-region fixture dropped from 96.6 µs to 74.9 µs, and the frame check now requires the same region as the interrupted RSP. |
+| 2 xstate | **Fixed.** `NT_X86_XSTATE` is probed once with a 64 KiB aligned buffer, the returned size is cached, and save/restore use exactly that size; `NT_PRFPREG` is used only for `EINVAL`/`EOPNOTSUPP`/`ENODEV`. |
+| 3 frame region | **Fixed.** `ensure_frame` is shared and requires the frame's region to contain the interrupted stack pointer. |
+| 3b early return | **Fixed more broadly than proposed.** Instead of rejecting `function == saved.rip`, a breakpoint hit is accepted only when RSP is above the synthetic frame; early hits are stepped over with `EFLAGS.RF`. The new spin-add test calls the function the thread is running 1000 times and requires the real result every time. |
+| 4 `Cleanup.call` | **Fixed docs/Display without breaking the API.** The field now documents both call and setup failures, and `Display` says "the preceding operation also failed". The field name is retained. |
+| 4b leak masking | **Fixed.** The `Leak` is recorded before the close attempt, so a `CloseHandle` failure cannot hide abandoned memory. |
+| 5 narrow returns | **Fixed docs + test.** A `Return values` section covers both ABIs; the fixture returns `u32` and the test relies only on the low half. |
+| 6 `CallStatus` | **Fixed.** The sys enum is `#[non_exhaustive]`; the safe mapper falls back to `Other`. |
+| 7 error docs / EBUSY | **Fixed.** Error lists are complete, the observed `EPERM` is documented (with the `EBUSY` hedge), and the validation-order claim was reworded. |
+| 8 timeout/stops | **Fixed.** The deadline is checked every iteration, forwarded stops are capped, the post-timeout interrupt wait is bounded by a 500 ms grace, `PTRACE_INTERRUPT` is not sent to a stopped tracee, and `fail_after_wait` restores GP/debug without touching FP state. |
+| 8b detach ESRCH | **Fixed.** `detach_with_signal` distinguishes a dead task from a running one and retries after a pending stop; a target that cannot be detached is reported. |
+| 9 panic guards | **Fixed.** The guard stays armed until `run` returns, stores the saved `DebugState`, and restores it before detaching on unwind. |
+| 10 `must_use` | **Fixed.** `CallOutcome` is `#[must_use]`. |
+| 11 sys preconditions | **Rejected with rationale.** Making `windows::call` `unsafe` would force either `unsafe` into the `#![forbid(unsafe_code)]` facade or an unsafe wrapper, defeating the layering. The sys entry points keep documented preconditions, matching `memdiver`'s safe-but-dangerous write API. |
+| 12 Wine DR window | **Documented** in the crate docs and README. |
+| 13 limitations/signals | **Fixed/documented.** Stack headroom, unwinding, early-hit disambiguation, and signal behavior are documented; signal-delivery stops are forwarded, event/group stops abort, and a pending signal is delivered on detach. |
+| 14 handle rights | **Corrected.** `CreateRemoteThread` requires five of the six rights; only `PROCESS_SYNCHRONIZE` on the process handle is unused. The mask was left unchanged. |
+| 15 CFG/IBT | **Fixed for the stub entry.** Both stubs start with `ENDBR64`/`ENDBR32`; the indirect callee requirement is documented. Native CFG/CET remains unverified locally as stated. |
+| 15b variadic AL | **Fixed.** `xor eax, eax` precedes the call and the indirect target uses `R11`; byte tests updated. |
+| 16 ABI enums | **Fixed.** One `memdiver_call_sys::Abi` and one `From<Abi> for X86Abi`; `windows::Abi` and `wine32::WineAbi` are gone. |
+| 17 validation duplication | **Partially fixed.** Shared region snapshot, `MAX_ARGUMENTS`, and error mapping removed most of the cost and drift; the independent sys-side validation is retained as defense in depth and the layering docs now say so. |
+| 18 helpers | **Fixed.** Shared frame validator, `From<X86Error>`, `inspect`, attach handshake, `Detachable`, `MAX_ARGUMENTS`, and `STACK_HEADROOM`. |
+| 19 caller orchestration | **Deferred.** The platform-specific constructors remain; a `Backend` enum is a larger refactor and not risk-free. |
+| 20 `wine32::run` | **Improved.** `fail_detached` removed 14 repeated blocks; the function is still long but its happy path is now linear. |
+| 21 dead frame checks | **Fixed.** Replaced with debug assertions. |
+| 22 error chain | **Partly addressed.** `Cleanup` semantics are fixed; the `map_*` functions remain and are documented as context-based. |
+| 23 casts/nits | **Accepted.** The remaining `unwrap_or` sentinels are provably unreachable on the supported hosts; no behavior change. |
+| 24 nits | **Mostly fixed.** `must_use`, `direct_call`, SAFETY text, call doc, ENDBR, zeroing AL; the remaining allocation/`GetSystemInfo`/poll micro-nits are left as low-priority. |
+| 25 tests | **Mostly fixed.** Added: NoCompletion (`ExitThread`), already-traced `Error::Open`, narrow return, Wine module base, early-return 1000-call test. Still open: PE-parser unit test, signal-forwarding test, indirect-call E2E, `Poisoned`/`Leaked` integration. |
+| 26 CI | **Fixed.** `--locked` on every command, release tests, Wine cache. |
+| 27 harness | **Partly fixed.** `/proc/<pid>/stat` parsing and the unused `data` field; `fixture_path` duplication and the blocking reap remain. |
+| 28 API/packaging | **Mostly fixed.** `Address`/`Process` re-export, `wine_module_base`, `is_supported` removed, `repository`, docs moved, `.gitignore` fixed. `windows-sys` remains 0.59 and the 0.1.1/0.1.0 version skew is unchanged (both are release decisions). |
+| 29 docs | **Fixed** across the crate docs, README, sys README, and changelog. |
+
+### Final verification
+
+The following were run on the final tree (Linux 7.3.3, stable Rust 1.99.1):
+
+* `cargo fmt --all -- --check`
+* `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+* `cargo clippy --workspace --all-targets --locked -- -D warnings`
+* `cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings`
+* `cargo clippy --workspace --all-targets --target i686-pc-windows-gnu --locked -- -D warnings`
+* `cargo test --workspace --locked` (16 + 43 unit, 22 integration, 2 doc)
+* `cargo test --workspace --release --locked`
+* `cargo test --workspace --target x86_64-pc-windows-gnu --locked` under Wine (20 integration)
+* `cargo test --workspace --target i686-pc-windows-gnu --locked` under Wine (21 integration)
+* `cargo test -p memdiver-call-tests --features wine32-tests --test wine32 --locked -- --test-threads=1` under Wine (13 integration)
+* `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
+* `cargo package --list --locked` for both published crates
+
+MSRV 1.85 was not re-run offline (the toolchain cannot be installed in this sandbox); CI
+runs it. Nothing was published to crates.io.
