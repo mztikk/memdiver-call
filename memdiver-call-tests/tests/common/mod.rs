@@ -23,6 +23,9 @@ pub(crate) struct Fixture {
     pub(crate) flag: u64,
     /// Address of `fixture_exit`.
     pub(crate) exit: u64,
+    /// Address of `fixture_exit_thread` (Windows only).
+    #[cfg(windows)]
+    pub(crate) exit_thread: u64,
     /// Address of the fixture's scratch buffer.
     pub(crate) buffer: u64,
     /// Address of the fixture's data export.
@@ -110,6 +113,8 @@ impl Fixture {
             ping: number("ping"),
             flag: number("flag"),
             exit: number("exit"),
+            #[cfg(windows)]
+            exit_thread: number("exit_thread"),
             buffer: number("buffer"),
             data: number("data"),
             module,

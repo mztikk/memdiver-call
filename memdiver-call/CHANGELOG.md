@@ -4,6 +4,42 @@ All notable changes to `memdiver-call` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Size the saved xstate from the kernel instead of a fixed 4 KiB buffer; on
+  AMX-class CPUs the previous buffer was truncated and restoring it failed.
+- Disambiguate early return-breakpoint hits with the stack pointer and the
+  resume flag, so calling the function the thread is executing returns its
+  result instead of a stale register.
+- Check the safe-point deadline on every iteration, bound forwarded stops and
+  the post-timeout interrupt wait, classify job-control stops, preserve a
+  pending signal when detaching after a failure, and stop treating `ESRCH`
+  from `PTRACE_DETACH` as "already detached".
+- Restore the saved debug registers from the attach guard on unwind;
+  `CallOutcome` is now `must_use`.
+- Report a Windows leak before closing the thread handle so a close failure
+  cannot mask an abandoned allocation.
+- Zero `AL` in the x64 stub for variadic callees and carry the indirect target
+  in `R11`.
+- Correct the documented error sets, narrow-return contract, and native
+  Linux/Wine limitations.
+
+### Changed
+
+- Use one region-map snapshot per call instead of up to five `region_at`
+  calls, and require the call frame to be in the interrupted stack region.
+- One `Abi` enum in `memdiver-call-sys`; `windows::Abi` and `wine32::WineAbi`
+  are merged into it. `memdiver-call-sys::CallStatus` is non-exhaustive.
+- Re-export `Address` and `Process` from `memdiver-call`; add
+  `RemoteCaller::wine_module_base`; the attach guard is panic-safe.
+
+### Removed
+
+- `memdiver_call_sys::is_supported` (it was always true where the crate
+  compiles).
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed

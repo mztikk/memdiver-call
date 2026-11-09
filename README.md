@@ -31,6 +31,7 @@ memdiver-call-tests/    Fixture binary and end-to-end tests (publish = false)
     tests/remote_call.rs
     tests/wine32.rs     opt-in native Linux -> Wine 32-bit suite
     tests/common/mod.rs
+docs/                   Design notes, implementation brief, and code review
 ```
 
 ## Quick start
@@ -96,6 +97,15 @@ WINEPREFIX="$PWD/target/wine32-test-prefix" WINEDEBUG=-all \
 * [`memdiver-call/README.md`](memdiver-call/README.md) — feature matrix,
   platform permissions, safety, limitations, observability, and testing.
 * Rustdoc: `cargo doc --workspace --no-deps --open`.
+
+## Design notes
+
+* [`docs/investigation.md`](docs/investigation.md) — mechanism options,
+  prototypes, and design decisions.
+* [`docs/task-brief.md`](docs/task-brief.md) — the implementation brief and
+  acceptance checklist.
+* [`docs/code-review.md`](docs/code-review.md) — review findings, verification,
+  and remediation.
 
 ## License
 

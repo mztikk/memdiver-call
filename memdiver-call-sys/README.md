@@ -11,9 +11,11 @@ This crate owns every `unsafe` block in the project:
   protection changes, `CreateRemoteThread`, wait/exit-code checks, and
   allocation cleanup.
 
-It deliberately contains no policy: the safe crate validates the request and
-maps these errors into its public error type. Do not depend on this crate
-directly unless you are implementing `memdiver-call` itself.
+It deliberately contains no policy of its own beyond the mechanism invariants
+needed to execute a request safely (argument count, address classes, frame
+bounds). The safe crate owns the public policy and maps these errors into its
+public error type. Do not depend on this crate directly unless you are
+implementing `memdiver-call` itself.
 
 ## Safety
 

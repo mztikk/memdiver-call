@@ -20,17 +20,19 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: Release tests
+        run: cargo test --workspace --release --locked
       - name: Documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --locked
       - name: Package contents
         run: |
-          cargo package --list -p memdiver-call
-          cargo package --list -p memdiver-call-sys
+          cargo package --list --locked -p memdiver-call
+          cargo package --list --locked -p memdiver-call-sys
 
   windows:
     name: Windows ${{ matrix.target }}
@@ -51,9 +53,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Tests
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --workspace --target ${{ matrix.target }} --locked
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} --locked -- -D warnings
 
   windows-wine:
     name: Windows cross-tests (Wine)
@@ -64,6 +66,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu, i686-pc-windows-gnu
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install MinGW and Wine
         run: |
           sudo dpkg --add-architecture i386
@@ -71,34 +74,34 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 wine wine64 wine32:i386
       - name: Cross-check x86_64
-        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu --locked
       - name: Cross-clippy x86_64
-        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings
       - name: Cross-check x86
-        run: cargo check --workspace --all-targets --target i686-pc-windows-gnu
+        run: cargo check --workspace --all-targets --target i686-pc-windows-gnu --locked
       - name: Cross-clippy x86
-        run: cargo clippy --workspace --all-targets --target i686-pc-windows-gnu -- -D warnings
+        run: cargo clippy --workspace --all-targets --target i686-pc-windows-gnu --locked -- -D warnings
       - name: Test x86_64 under Wine
         env:
           WINEPREFIX: ${{ github.workspace }}/.wine-x64
           WINEDEBUG: "-all"
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: wine
-        run: cargo test --workspace --target x86_64-pc-windows-gnu
+        run: cargo test --workspace --target x86_64-pc-windows-gnu --locked
       - name: Test x86 under Wine
         env:
           WINEPREFIX: ${{ github.workspace }}/.wine-wow64
           WINEDEBUG: "-all"
           CARGO_TARGET_I686_PC_WINDOWS_GNU_RUNNER: wine
-        run: cargo test --workspace --target i686-pc-windows-gnu
+        run: cargo test --workspace --target i686-pc-windows-gnu --locked
       - name: Build the 32-bit fixture for the native Wine tests
-        run: cargo build -p memdiver-call-tests --target i686-pc-windows-gnu --bin memdiver-call-fixture
+        run: cargo build -p memdiver-call-tests --target i686-pc-windows-gnu --locked --bin memdiver-call-fixture
       - name: Clippy native Wine 32-bit tests
-        run: cargo clippy -p memdiver-call-tests --features wine32-tests --test wine32 -- -D warnings
+        run: cargo clippy -p memdiver-call-tests --features wine32-tests --test wine32 --locked -- -D warnings
       - name: Test native Linux -> Wine 32-bit
         env:
           WINEPREFIX: ${{ github.workspace }}/target/wine32-ci-prefix
           WINEDEBUG: "-all"
-        run: cargo test -p memdiver-call-tests --features wine32-tests --test wine32 -- --test-threads=1
+        run: cargo test -p memdiver-call-tests --features wine32-tests --test wine32 --locked -- --test-threads=1
 
   msrv:
     name: MSRV 1.85
@@ -110,4 +113,4 @@ jobs:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked

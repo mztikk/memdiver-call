@@ -80,16 +80,6 @@ pub enum Abi {
     Fastcall,
 }
 
-/// Reports whether this build can execute a remote call.
-///
-/// This is a compile-time property: the crate fails to compile on a platform
-/// where the answer would be `false`.
-#[must_use]
-pub const fn is_supported() -> bool {
-    (cfg!(target_os = "linux") && cfg!(target_arch = "x86_64"))
-        || (cfg!(windows) && (cfg!(target_arch = "x86_64") || cfg!(target_arch = "x86")))
-}
-
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(windows, any(target_arch = "x86_64", target_arch = "x86"))

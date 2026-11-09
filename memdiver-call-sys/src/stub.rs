@@ -17,7 +17,7 @@ pub(crate) struct GeneratedStub {
     /// Machine code to place at the stub address.
     pub(crate) bytes: Vec<u8>,
     /// Whether the function is reached with a direct `call rel32`.
-    #[allow(dead_code)] // read by unit tests
+    #[cfg(test)]
     pub(crate) direct_call: bool,
 }
 
@@ -106,6 +106,7 @@ pub(crate) fn build_x64(
 
     GeneratedStub {
         bytes,
+        #[cfg(test)]
         direct_call: direct.is_some(),
     }
 }
@@ -185,6 +186,7 @@ pub(crate) fn build_x86(
 
     GeneratedStub {
         bytes,
+        #[cfg(test)]
         direct_call: direct.is_some(),
     }
 }

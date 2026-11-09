@@ -124,6 +124,19 @@ pub extern "C" fn fixture_exit() -> u64 {
     std::process::exit(0)
 }
 
+/// Terminates the calling thread without returning through the remote stub.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn fixture_exit_thread() -> u64 {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ExitThread(exit_code: u32) -> !;
+    }
+    // SAFETY: terminating only the calling thread is the point of the test.
+    unsafe { ExitThread(0) }
+}
+
 /// `stdcall` variant for Windows `x86`.
 #[cfg(all(windows, target_arch = "x86"))]
 #[unsafe(no_mangle)]
@@ -202,6 +215,15 @@ fn main() {
     {
         use std::fmt::Write as _;
         let _ = write!(ready, " tick={:#x}", address_of(fixture_tick as *const ()),);
+    }
+    #[cfg(windows)]
+    {
+        use std::fmt::Write as _;
+        let _ = write!(
+            ready,
+            " exit_thread={:#x}",
+            address_of(fixture_exit_thread as *const ()),
+        );
     }
     #[cfg(all(windows, target_arch = "x86"))]
     {

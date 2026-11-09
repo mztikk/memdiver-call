@@ -23,8 +23,7 @@ and export resolution; `memdiver-call` adds the execution mechanism that
 vendored.
 
 ```rust
-use memdiver::Address;
-use memdiver_call::{CallOptions, RemoteCaller};
+use memdiver_call::{Address, CallOptions, RemoteCaller};
 
 let caller = RemoteCaller::open(pid)?;
 let result = caller.call(Address::new(address), &[1, 2], &CallOptions::new())?;
@@ -104,8 +103,7 @@ the thread. `RemoteCaller::open_wine` uses the same hardware-breakpoint
 mechanism as the Linux backend and never writes target code.
 
 ```rust
-use memdiver::Address;
-use memdiver_call::{CallAbi, CallOptions, RemoteCaller};
+use memdiver_call::{Address, CallAbi, CallOptions, RemoteCaller};
 
 let caller = RemoteCaller::open_wine(pid)?;
 let options = CallOptions::new()
@@ -326,8 +324,7 @@ cargo run -p memdiver-call-tests --example call_fixture
 The library-side code is:
 
 ```rust,no_run
-use memdiver::Address;
-use memdiver_call::{CallOptions, RemoteCaller};
+use memdiver_call::{Address, CallOptions, RemoteCaller};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let caller = RemoteCaller::open(1234)?;

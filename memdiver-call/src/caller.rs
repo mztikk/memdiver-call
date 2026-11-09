@@ -63,6 +63,9 @@ pub struct RemoteCaller {
     execution: memdiver_call_sys::Execution,
     serialization: Mutex<()>,
     kind: TargetKind,
+    /// PE main-module load address, for the Wine 32-bit backend only.
+    #[cfg(target_os = "linux")]
+    wine_base: Option<u64>,
 }
 
 impl RemoteCaller {
@@ -133,6 +136,23 @@ impl RemoteCaller {
     #[must_use]
     pub fn target_kind(&self) -> TargetKind {
         self.kind
+    }
+
+    /// Returns the load address of the 32-bit PE main module.
+    ///
+    /// This is `Some` only for a caller created with
+    /// [`RemoteCaller::open_wine`]/[`RemoteCaller::new_wine`]; it is always
+    /// `None` for other targets.
+    #[must_use]
+    pub fn wine_module_base(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            self.wine_base
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     /// Returns the underlying memory handle.
@@ -464,6 +484,7 @@ fn open_pinned(pid: u32) -> Result<RemoteCaller, Error> {
         process,
         serialization: Mutex::new(()),
         kind: TargetKind::Native,
+        wine_base: None,
     })
 }
 
@@ -513,6 +534,7 @@ fn adopt(process: Process) -> Result<RemoteCaller, Error> {
         process,
         serialization: Mutex::new(()),
         kind: TargetKind::Native,
+        wine_base: None,
     })
 }
 
@@ -547,11 +569,13 @@ fn adopt_wine(process: Process) -> Result<RemoteCaller, Error> {
     if !process.is_alive() {
         return Err(Error::TargetExited { pid });
     }
-    memdiver_call_sys::wine32::detect(&process).map_err(|error| map_wine_error(error, pid))?;
+    let target =
+        memdiver_call_sys::wine32::detect(&process).map_err(|error| map_wine_error(error, pid))?;
     Ok(RemoteCaller {
         process,
         serialization: Mutex::new(()),
         kind: TargetKind::Wine32,
+        wine_base: Some(target.module_base()),
     })
 }
 

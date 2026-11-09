@@ -338,6 +338,76 @@ fn call_after_target_exit_reports_target_exited() {
 
 #[cfg(windows)]
 #[test]
+fn exit_thread_reports_no_completion() {
+    let mut fixture = Fixture::spawn();
+    let caller = open(&fixture);
+    let error = caller
+        .call(Address::new(fixture.exit_thread), &[], &CallOptions::new())
+        .expect_err("thread exit");
+    assert!(
+        matches!(
+            error,
+            Error::CallFailed {
+                status: memdiver_call::CallStatus::NoCompletion,
+                ..
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    fixture.ping();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn open_on_an_already_traced_target_is_reported() {
+    let mut fixture = Fixture::spawn();
+    let pid = fixture.pid() as libc::pid_t;
+    // SAFETY: the fixture is our child; these are documented ptrace requests
+    // with null address/data arguments.
+    unsafe {
+        assert_eq!(
+            libc::ptrace(
+                libc::PTRACE_SEIZE,
+                pid,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            ),
+            0
+        );
+        assert_eq!(
+            libc::ptrace(
+                libc::PTRACE_INTERRUPT,
+                pid,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            ),
+            0
+        );
+        let mut status = 0;
+        assert_eq!(libc::waitpid(pid, &mut status, libc::__WALL), pid);
+    }
+    let error = RemoteCaller::open(fixture.pid()).expect_err("already traced");
+    assert!(
+        matches!(error, Error::Open { .. }),
+        "unexpected error: {error:?}"
+    );
+    // SAFETY: we are the tracer and the tracee is stopped.
+    unsafe {
+        assert_eq!(
+            libc::ptrace(
+                libc::PTRACE_DETACH,
+                pid,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            ),
+            0
+        );
+    }
+    fixture.ping();
+}
+
+#[cfg(windows)]
+#[test]
 fn thread_option_is_unsupported_on_windows() {
     let mut fixture = Fixture::spawn();
     let caller = open(&fixture);

@@ -121,8 +121,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use memdiver::Address;
-//! use memdiver_call::{CallOptions, RemoteCaller};
+//! use memdiver_call::{Address, CallOptions, RemoteCaller};
 //!
 //! # fn main() -> Result<(), memdiver_call::Error> {
 //! let caller = RemoteCaller::open(4242)?;
@@ -170,3 +169,7 @@ mod options;
 pub use caller::{RemoteCaller, TargetKind};
 pub use error::{CallStatus, Error, PlatformError};
 pub use options::{CallAbi, CallOptions};
+
+// Re-export the `memdiver` types that appear in this crate's public signatures
+// so a user does not need a second direct dependency just to name them.
+pub use memdiver::{Address, Process};

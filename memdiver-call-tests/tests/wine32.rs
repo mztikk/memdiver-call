@@ -269,6 +269,16 @@ fn find_pe_process(tag: &str, parent: u32, launcher: u32, timeout: Duration) -> 
 }
 
 #[test]
+fn wine_module_base_is_reported() {
+    let fixture = WineFixture::spawn();
+    let caller = fixture.open();
+    assert!(
+        caller.wine_module_base().is_some(),
+        "open_wine must report the PE main-module base"
+    );
+}
+
+#[test]
 fn calls_with_a_safe_point() {
     let fixture = WineFixture::spawn();
     let caller = fixture.open();
