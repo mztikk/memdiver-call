@@ -92,6 +92,9 @@
 //! * C++ exceptions or `longjmp` unwinding through the synthetic frame are
 //!   unsupported. The call runs on the game's main thread under its locks and
 //!   thread-local state, which is the caller's risk.
+//! * Debug-register state is captured before the safe-point wait. Hardware
+//!   breakpoints the target installs during the wait are overwritten when the
+//!   return breakpoint is re-armed and are not restored afterwards.
 //!
 //! # Safety
 //!
@@ -134,8 +137,25 @@
 //! No timeout, cancellation, asynchronous calls, or thread hijacking; no
 //! floating-point, SIMD, struct-by-value, variadic, or C++ `thiscall` on
 //! `x86_64` support; no general remote allocation or string/struct marshalling;
-//! no ARM64; no Linux thread selection beyond the main thread; no
-//! `WOW64`/cross-bitness calls. A call that never returns hangs the caller.
+//! no ARM64; no Linux thread selection beyond the main thread; no `WOW64` or
+//! native cross-bitness calls. A call that never returns hangs the caller.
+//!
+//! Linux and Wine 32-bit calls hijack the interrupted thread's stack below its
+//! current `RSP`. Only 4 KiB of mapped stack below the frame is guaranteed, so
+//! a callee with a large stack frame or deep recursion can reach the guard page
+//! and crash the target. The synthetic frame has no unwind metadata: C++
+//! exceptions, `longjmp`, or a `backtrace` that unwinds past the called
+//! function are unsupported on native Linux and Wine 32-bit targets too, not
+//! only on Windows.
+//!
+//! The return breakpoint is placed at the interrupted instruction. A hit is
+//! recognized as the return by checking the stack pointer, and an early hit is
+//! stepped over with the resume flag. A callee that executes that instruction
+//! with a stack pointer above the synthetic frame can still be mistaken for the
+//! return (rare). Signal-delivery stops are forwarded to the target; a
+//! job-control group-stop aborts the call, and a fatal signal raised while the
+//! call runs is delivered when the tracer detaches.
+//!
 //! On Windows the generated stub has no unwind metadata, so C++ exceptions
 //! must not cross it. Native Windows Control Flow Guard and CET behaviour is
 //! not verified by this project's local test suite.

@@ -713,7 +713,7 @@ fn poll(tid: libc::pid_t, deadline: Option<Instant>) -> Result<Poll, SysError> {
 
 /// Arms the hardware execution breakpoint in `slot` at `address`.
 fn arm(tid: libc::pid_t, slot: u8, address: u64, saved_dr7: u64) -> Result<(), SysError> {
-    // Acknowledge DR6 first: POKEUSER(DR7) can fail while a status bit is set.
+    // Clear the status bits left by an earlier hit before re-arming.
     linux::poke_user(tid, linux::DR6_OFFSET, 0, "PTRACE_POKEUSER(DR6)")?;
     linux::poke_user(
         tid,

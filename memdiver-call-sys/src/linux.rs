@@ -530,11 +530,10 @@ pub(crate) fn restore_and_detach(
     failures.into_result()
 }
 
-/// Restores the debug registers, acknowledging `DR6` before touching `DR7`.
+/// Restores the debug registers, clearing `DR6` before touching `DR7`.
 ///
-/// On the tested kernel `PTRACE_POKEUSER(DR7)` fails with `EIO` while the
-/// breakpoint-hit status bit in `DR6` is set, so the status bits are cleared
-/// first and the saved `DR6` is restored last.
+/// Clearing the breakpoint-status bits first keeps them from being carried
+/// into the re-armed state; the saved `DR6` is restored last.
 pub(crate) fn restore_debug_state(tid: libc::pid_t, saved: &DebugState) -> Result<(), SysError> {
     let mut failures = Failures::default();
     failures.record(poke_user(tid, DR6_OFFSET, 0, "PTRACE_POKEUSER(DR6)"));

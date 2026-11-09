@@ -23,7 +23,11 @@ pub struct CallOutcome {
 }
 
 /// How a call ended without producing a normal integer result.
+///
+/// The enum is non-exhaustive so new platform statuses can be added without a
+/// breaking release; `memdiver-call` maps an unknown status to its `Other`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CallStatus {
     /// The remote thread exited with this non-zero code before the generated
     /// stub could report a result.
@@ -189,10 +193,7 @@ impl fmt::Display for SysError {
             Self::CallFailed(status) => write!(f, "the remote call failed: {status}"),
             Self::Inspect { operation, source } => write!(f, "{operation} failed: {source}"),
             Self::Leak { operation, reason } => {
-                write!(
-                    f,
-                    "abandoned remote memory because {operation} was unsafe: {reason}"
-                )
+                write!(f, "skipped {operation} because {reason}")
             }
         }
     }

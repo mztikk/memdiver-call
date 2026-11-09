@@ -254,9 +254,23 @@ Use this only on processes you own or are explicitly authorized to inspect.
   `call_export`, only the main thread, and a safe point is required whenever
   the thread is not stopped in 32-bit code. Safe-point waiting is bounded; the
   call is not.
-* **Signals:** non-breakpoint signals received by the traced Linux thread
-  during a call are forwarded, and the call fails if the target dies. A signal
-  storm is bounded and fails the call rather than hanging.
+* **Stack headroom:** the call frame is placed below the interrupted `RSP` and
+  only 4 KiB of mapped stack below it is guaranteed. A callee with a large
+  stack frame or deep recursion can reach the guard page and crash the target.
+* **Unwinding:** the synthetic frame has no unwind metadata. C++ exceptions,
+  `longjmp`, or a `backtrace` that unwinds past the called function are
+  unsupported on native Linux and Wine 32-bit targets too, not only on Windows.
+* **Early breakpoint hits:** the return breakpoint is at the interrupted
+  instruction. A hit is recognized by the stack pointer and an early hit is
+  stepped over with the resume flag; a callee that executes that instruction
+  with a stack pointer above the frame can still be mistaken for the return.
+* **Signals:** signal-delivery stops received by the traced Linux thread during
+  a call are forwarded; a job-control group-stop aborts the call; a fatal
+  signal raised while the call runs is delivered when the tracer detaches. A
+  signal storm is bounded and fails the call rather than hanging.
+* **Wine debug registers:** debug-register state is captured before the
+  safe-point wait. Breakpoints the target installs during the wait are
+  overwritten by the re-arm and are not restored afterwards.
 * **Target death during setup or call** is reported as
   `Error::TargetExited`/`Error::CallFailed`, never as success.
 * **A killed caller can leave a Linux target stopped.** If the calling process

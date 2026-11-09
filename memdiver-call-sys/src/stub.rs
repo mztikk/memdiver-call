@@ -33,7 +33,8 @@ pub(crate) struct GeneratedStub {
 /// mov r9,  arg3
 /// mov rax, arg4 ; mov [rsp+0x20], rax
 /// mov rax, arg5 ; mov [rsp+0x28], rax
-/// <call the function: E8 rel32 or mov rax, imm64; call rax>
+/// xor eax, eax                 ; AL = 0 vector registers (variadic ABI)
+/// <call the function: E8 rel32 or mov r11, imm64; call r11>
 /// mov [result], rax
 /// mov rcx, result+8 ; mov qword [rcx], 1
 /// xor eax, eax
@@ -65,6 +66,11 @@ pub(crate) fn build_x64(
     mov_imm64(&mut bytes, 0x48, 0xB8, argument(args, 5)); // rax
     bytes.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x28]); // mov [rsp+0x28], rax
 
+    // AL holds the number of vector registers used for a variadic callee; a
+    // non-variadic call does not care, and zero is the safe value. RAX is
+    // zeroed before the call; the indirect target goes through R11 instead.
+    bytes.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax
+
     // The call. A direct relocation is not subject to Control Flow Guard and
     // keeps CET-IBT out of the picture; use it whenever the stub is within
     // +/-2 GiB of the function.
@@ -79,8 +85,8 @@ pub(crate) fn build_x64(
             bytes.extend_from_slice(&rel32.to_le_bytes());
         }
         None => {
-            mov_imm64(&mut bytes, 0x48, 0xB8, function); // mov rax, function
-            bytes.extend_from_slice(&[0xFF, 0xD0]); // call rax
+            mov_imm64(&mut bytes, 0x49, 0xBB, function); // mov r11, function
+            bytes.extend_from_slice(&[0x41, 0xFF, 0xD3]); // call r11
         }
     }
 
@@ -229,8 +235,10 @@ mod tests {
             0x48, 0xB8, 5, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0x44, 0x24, 0x20, //
             // mov rax, 6 ; mov [rsp+0x28], rax
             0x48, 0xB8, 6, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0x44, 0x24, 0x28, //
-            // call rel32: 0x2000_1000 - 0x2000_004F = 0xFB1
-            0xE8, 0xB1, 0x0F, 0x00, 0x00, //
+            // xor eax, eax
+            0x31, 0xC0, //
+            // call rel32: 0x2000_1000 - (0x2000_0000 + 0x4C + 5) = 0xFAF
+            0xE8, 0xAF, 0x0F, 0x00, 0x00, //
             // mov [0x3000_0000], rax
             0x48, 0xA3, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, //
             // mov rcx, 0x3000_0008 ; mov qword [rcx], 1
@@ -241,22 +249,24 @@ mod tests {
         ];
         assert_eq!(stub.bytes, expected);
         assert!(stub.direct_call);
-        assert_eq!(stub.bytes.len(), 113);
+        assert_eq!(stub.bytes.len(), 115);
     }
 
     #[test]
     fn x64_uses_an_indirect_call_when_out_of_range() {
         let stub = build_x64(0x2000_0000, 0x7FFF_0000_0000, 0x3000_0000, &[]);
         assert!(!stub.direct_call);
-        let call_offset = 74;
-        assert_eq!(&stub.bytes[call_offset..call_offset + 2], &[0x48, 0xB8]);
+        let xor_offset = 74;
+        assert_eq!(&stub.bytes[xor_offset..xor_offset + 2], &[0x31, 0xC0]);
+        let r11_offset = xor_offset + 2;
+        assert_eq!(&stub.bytes[r11_offset..r11_offset + 2], &[0x49, 0xBB]);
         assert_eq!(
-            &stub.bytes[call_offset + 2..call_offset + 10],
+            &stub.bytes[r11_offset + 2..r11_offset + 10],
             &0x7FFF_0000_0000u64.to_le_bytes()
         );
         assert_eq!(
-            &stub.bytes[call_offset + 10..call_offset + 12],
-            &[0xFF, 0xD0]
+            &stub.bytes[r11_offset + 10..r11_offset + 13],
+            &[0x41, 0xFF, 0xD3]
         );
     }
 
@@ -273,7 +283,7 @@ mod tests {
     fn x64_result_addresses_are_patched() {
         let stub = build_x64(0x2000_0000, 0x2000_1000, 0xDEAD_B000, &[]);
         let bytes = &stub.bytes;
-        let result_store = 4 + 40 + 30 + 5;
+        let result_store = 4 + 40 + 30 + 5 + 2;
         assert_eq!(&bytes[result_store..result_store + 2], &[0x48, 0xA3]);
         assert_eq!(
             &bytes[result_store + 2..result_store + 10],

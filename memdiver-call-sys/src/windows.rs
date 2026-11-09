@@ -116,7 +116,9 @@ pub fn open_execution(pid: u32) -> Result<Execution, SysError> {
 ///
 /// The caller must have validated the address, the argument count, and the
 /// ABI. The mechanism maps the stub, creates one remote thread, waits for it,
-/// reads the result, and frees every allocation it created.
+/// reads the result, and frees every allocation it created. If the wait fails,
+/// the thread may still be running and both remote pages are abandoned and
+/// reported as [`SysError::Leak`] instead of being freed.
 pub fn call(
     execution: &Execution,
     process: &Process,
@@ -238,10 +240,12 @@ impl RemoteState {
 
     /// Starts one remote thread at `address`.
     fn create_thread(&self, address: usize) -> Result<isize, SysError> {
-        // SAFETY: `address` points at the generated stub. Windows enters a
-        // thread start routine with the `stdcall` convention and one ignored
-        // `lpParameter`; the stub preserves that stack frame and returns with
-        // `ret 4`, so the function-pointer type is the correct contract.
+        // SAFETY: `address` points at the generated stub. On x86, Windows
+        // enters a thread start routine with the `stdcall` convention and one
+        // ignored `lpParameter`, and the x86 stub preserves that frame and
+        // returns with `ret 4`; on x64 the Microsoft x64 convention applies,
+        // the stub ends with a plain `ret`, and the caller cleans up. The
+        // `extern "system"` function-pointer type matches both.
         let start: LPTHREAD_START_ROUTINE = Some(unsafe {
             std::mem::transmute::<usize, unsafe extern "system" fn(*mut core::ffi::c_void) -> u32>(
                 address,
@@ -315,17 +319,22 @@ impl RemoteState {
         let mut failures = Failures::default();
         let thread_may_run = self.thread.is_some() && !self.thread_finished;
 
-        if let Some(thread) = self.thread.take() {
-            failures.record(close_handle(thread));
-        }
         if thread_may_run {
             let _ = self.stub.take();
             let _ = self.result.take();
+            // The leak is the contract the caller needs; record it before the
+            // close attempt so a rare `CloseHandle` failure cannot mask it.
             failures.record_error(Some(SysError::Leak {
                 operation: "VirtualFreeEx",
                 reason: "the remote thread may still be running",
             }));
+            if let Some(thread) = self.thread.take() {
+                failures.record(close_handle(thread));
+            }
             return failures.into_option();
+        }
+        if let Some(thread) = self.thread.take() {
+            failures.record(close_handle(thread));
         }
         if let Some(address) = self.result.take() {
             failures.record(self.free(address));

@@ -1,11 +1,11 @@
 //! Unsafe platform mechanism for [`memdiver-call`].
 //!
 //! This crate owns everything that needs `unsafe`: the Linux `ptrace`
-//! machinery and the Windows remote-thread machinery. It has no policy. It
-//! does not decide whether a call is allowed, it does not validate calling
-//! conventions beyond what the mechanism requires, and it does not define the
-//! public error type. [`memdiver-call`] performs validation and maps the
-//! errors returned here.
+//! machinery and the Windows remote-thread machinery. It deliberately contains
+//! no policy of its own beyond the mechanism invariants needed to execute a
+//! request safely (argument count, address classes, and frame bounds) as
+//! defense in depth. [`memdiver-call`] owns the public policy, performs the
+//! user-facing validation, and maps the errors returned here.
 //!
 //! [`memdiver-call`]: https://docs.rs/memdiver-call
 //!
@@ -16,6 +16,7 @@
 //! | Linux `x86_64` | `ptrace` + a hardware execution breakpoint |
 //! | Windows `x86_64` | `CreateRemoteThread` + a generated stub |
 //! | Windows `x86` | `CreateRemoteThread` + a generated 32-bit stub |
+//! | Linux `x86_64` → 32-bit Wine PE | `ptrace` in 32-bit compatibility mode + a safe point |
 //!
 //! Any other host fails to compile with an explicit diagnostic. Every
 //! `unsafe` block in this crate carries a `// SAFETY:` comment naming the

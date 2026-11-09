@@ -43,8 +43,8 @@ pub enum TargetKind {
 ///
 /// The type is `Send + Sync`, but calls on one instance are serialized with an
 /// internal mutex. Two separate callers for the same target are not
-/// coordinated; on Linux the second attach fails with `EBUSY` and is reported,
-/// not retried.
+/// coordinated; on Linux the second attach fails with `EPERM` (or `EBUSY` on
+/// some kernels) and is reported as [`Error::Open`], not retried.
 ///
 /// # Pinning
 ///
@@ -76,8 +76,9 @@ impl RemoteCaller {
     /// Returns [`Error::Open`] when the execution resource or the `memdiver`
     /// handle cannot be opened, [`Error::TargetExited`] when the target exits
     /// during setup, [`Error::Unsupported`] when the target's bitness differs
-    /// from the host, and [`Error::Cleanup`] when a resource opened during
-    /// setup cannot be released after a failure.
+    /// from the host, [`Error::Memory`] when the pointer width cannot be
+    /// queried, and [`Error::Cleanup`] when a resource opened during setup
+    /// cannot be released after a failure.
     pub fn open(pid: u32) -> Result<Self, Error> {
         open_pinned(pid)
     }
@@ -92,7 +93,8 @@ impl RemoteCaller {
     ///
     /// Returns [`Error::ReadOnly`] before any operating-system call when the
     /// handle is read-only, [`Error::TargetExited`] when the target is not
-    /// alive, [`Error::Unsupported`] for a bitness mismatch, and
+    /// alive, [`Error::Unsupported`] for a bitness mismatch,
+    /// [`Error::Memory`] when the pointer width cannot be queried, and
     /// [`Error::Open`]/[`Error::Cleanup`] for resource failures.
     pub fn new(process: Process) -> Result<Self, Error> {
         adopt(process)
@@ -123,8 +125,9 @@ impl RemoteCaller {
     ///
     /// Returns [`Error::ReadOnly`] before any operating-system call when the
     /// handle is read-only, [`Error::TargetExited`] when the target is gone,
-    /// and [`Error::Unsupported`] when the target is not a 32-bit PE under
-    /// Wine or the host is not Linux.
+    /// [`Error::Memory`] when region inspection fails, and
+    /// [`Error::Unsupported`] when the target is not a 32-bit PE under Wine or
+    /// the host is not Linux.
     pub fn new_wine(process: Process) -> Result<Self, Error> {
         adopt_wine(process)
     }
@@ -175,9 +178,13 @@ impl RemoteCaller {
     /// function is not in an executable live region, [`Error::TargetExited`]
     /// when the target is gone, [`Error::SafePointTimeout`] when a Wine target
     /// never reaches the safe point, [`Error::CallFailed`] when the call did
-    /// not return a normal result, and [`Error::Cleanup`] when target state
-    /// could not be restored or resources could not be released. All
-    /// validation errors are returned before the target is touched.
+    /// not return a normal result, [`Error::Open`] when the per-call attach or
+    /// execution resource cannot be acquired, [`Error::Platform`] when an
+    /// operating-system call fails, [`Error::Memory`] when region inspection
+    /// fails, [`Error::Leaked`] when remote memory had to be abandoned, and
+    /// [`Error::Cleanup`] when target state could not be restored or resources
+    /// could not be released. Validation errors are returned before any
+    /// execution resource is attached or created.
     pub fn call(
         &self,
         function: Address,

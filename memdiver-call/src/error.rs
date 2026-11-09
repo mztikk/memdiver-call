@@ -175,12 +175,14 @@ pub enum Error {
     /// Restoring the target state or releasing resources failed.
     ///
     /// A cleanup failure is always an error, even when the call itself
-    /// succeeded. When both failed, `call` keeps the call failure and
+    /// succeeded. When both failed, `call` keeps the primary failure — the
+    /// call failure for a call, or the setup failure for `open`/`new` — and
     /// `cleanup` keeps the cleanup failure.
     Cleanup {
         /// Function that was called, when the failure happened during a call.
         function: Option<Address>,
-        /// The call failure, when the call also failed.
+        /// The failure that triggered cleanup, when it also failed: the call
+        /// failure for a call, or the setup failure for `open`/`new`.
         call: Option<Box<Error>>,
         /// The cleanup failure.
         cleanup: Box<Error>,
@@ -254,15 +256,12 @@ impl fmt::Display for Error {
                     None => write!(f, "failed to restore the target state: {cleanup}")?,
                 }
                 if let Some(call) = call {
-                    write!(f, " (the call also failed: {call})")?;
+                    write!(f, " (the preceding operation also failed: {call})")?;
                 }
                 Ok(())
             }
             Self::Leaked { operation, reason } => {
-                write!(
-                    f,
-                    "abandoned remote memory because {operation} was unsafe: {reason}"
-                )
+                write!(f, "skipped {operation} because {reason}")
             }
             Self::Poisoned => f.write_str("the remote caller's serialization lock was poisoned"),
         }
@@ -288,6 +287,7 @@ pub(crate) fn status_from_sys(status: memdiver_call_sys::CallStatus) -> CallStat
         memdiver_call_sys::CallStatus::Signal(signal) => CallStatus::Signal(signal),
         memdiver_call_sys::CallStatus::Exited => CallStatus::Exited,
         memdiver_call_sys::CallStatus::NoCompletion => CallStatus::NoCompletion,
+        _ => CallStatus::Other,
     }
 }
 
@@ -312,7 +312,7 @@ mod tests {
         };
         let text = error.to_string();
         assert!(text.contains("failed to restore"));
-        assert!(text.contains("the call also failed"));
+        assert!(text.contains("the preceding operation also failed"));
         assert!(text.contains("PTRACE_DETACH"));
         assert!(error.source().is_some());
     }
