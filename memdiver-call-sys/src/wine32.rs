@@ -31,8 +31,8 @@ use crate::debug;
 use crate::error::{CallOutcome, CallStatus, SysError};
 use crate::frame_x86;
 use crate::linux::{self, DebugState, FpState};
-use crate::x86_args::{self, X86Abi, X86Error};
-use crate::{Failures, MAX_ARGUMENTS};
+use crate::x86_args::{self, X86Abi};
+use crate::{Abi, Failures, MAX_ARGUMENTS};
 
 /// `CS` value while executing 32-bit compatibility-mode code.
 const CS_I386: u64 = 0x23;
@@ -45,20 +45,6 @@ const EFLAGS_TF: u64 = 1 << 8;
 
 /// How often the safe-point wait re-checks for a stop.
 const POLL_INTERVAL: Duration = Duration::from_micros(200);
-
-/// The calling convention of a 32-bit Windows function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum WineAbi {
-    /// All arguments on the stack; the caller cleans up.
-    Cdecl,
-    /// All arguments on the stack; the callee cleans up.
-    Stdcall,
-    /// `this` in `ECX`; the remaining arguments on the stack.
-    Thiscall,
-    /// First two arguments in `ECX`/`EDX`; the remainder on the stack.
-    Fastcall,
-}
 
 /// A detected 32-bit Windows PE loaded into a Wine process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +68,7 @@ pub struct CallSpec<'a> {
     /// Argument values, one per declared argument.
     pub args: &'a [u64],
     /// Calling convention.
-    pub abi: WineAbi,
+    pub abi: Abi,
     /// Indices in `args` that are 64-bit and occupy two stack slots.
     pub wide_arguments: &'a [usize],
     /// Optional safe-point instruction address in 32-bit code.
@@ -154,33 +140,12 @@ impl Drop for Attached {
 /// target is gone, and [`SysError::Platform`] when `ptrace` fails (for example
 /// because Yama denies access or another tracer exists).
 pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
-    if tid != pid {
-        return Err(SysError::Unsupported {
-            operation: "attach",
-            reason: "only the main thread (TID == PID) is supported",
-        });
-    }
-    let tid = libc::pid_t::try_from(tid).map_err(|_| SysError::InvalidArgument {
-        index: usize::MAX,
-        reason: "thread id does not fit in a pid_t",
-    })?;
-    linux::check_shadow_stack(pid)?;
-    linux::ptrace_raw(libc::PTRACE_SEIZE, tid, 0, 0, "PTRACE_SEIZE")?;
-    if let Err(error) = linux::ptrace_raw(libc::PTRACE_INTERRUPT, tid, 0, 0, "PTRACE_INTERRUPT") {
-        let _ = linux::detach(tid);
-        return Err(error);
-    }
-    match linux::wait_for_initial_stop(tid) {
-        Ok(()) => Ok(Attached {
-            tid,
-            armed: true,
-            debug: None,
-        }),
-        Err(error) => {
-            let _ = linux::detach(tid);
-            Err(error)
-        }
-    }
+    let tid = linux::attach_thread(pid, tid)?;
+    Ok(Attached {
+        tid,
+        armed: true,
+        debug: None,
+    })
 }
 
 /// Detects the 32-bit Windows PE main module of a Wine process.
@@ -196,7 +161,7 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
 pub fn detect(process: &Process) -> Result<WineTarget, SysError> {
     let regions = process
         .regions()
-        .map_err(linux::inspect("Process::regions"))?;
+        .map_err(crate::inspect("Process::regions"))?;
     let mut saw_64_bit = false;
     for region in regions.iter() {
         let Some(path) = region.path() else {
@@ -258,35 +223,11 @@ pub fn detect(process: &Process) -> Result<WineTarget, SysError> {
     })
 }
 
-/// Maps the public calling convention to the internal 32-bit layout.
-fn x86_abi(abi: WineAbi) -> X86Abi {
-    match abi {
-        WineAbi::Cdecl => X86Abi::Cdecl,
-        WineAbi::Stdcall => X86Abi::Stdcall,
-        WineAbi::Thiscall => X86Abi::Thiscall,
-        WineAbi::Fastcall => X86Abi::Fastcall,
-    }
-}
-
-/// Maps a 32-bit argument-layout failure to a mechanism error.
-fn map_x86_error(error: X86Error) -> SysError {
-    match error {
-        X86Error::Index(index) => SysError::InvalidArgument {
-            index,
-            reason: "the wide-argument index is out of range",
-        },
-        X86Error::Duplicate(index) => SysError::InvalidArgument {
-            index,
-            reason: "the wide-argument index is repeated",
-        },
-        X86Error::NarrowValue(index) => SysError::InvalidArgument {
-            index,
-            reason: "the value does not fit in a 32-bit argument slot",
-        },
-        X86Error::WideRegister => SysError::Unsupported {
-            operation: "remote call",
-            reason: "64-bit register arguments are not supported; only stack arguments may be wide",
-        },
+/// Detaches and reports `error` before any target state was modified.
+fn fail_detached(tid: libc::pid_t, error: SysError) -> CallOutcome {
+    CallOutcome {
+        result: Err(error),
+        cleanup: linux::detach(tid).err(),
     }
 }
 
@@ -302,80 +243,62 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
         timeout,
     } = *spec;
     if args.len() > MAX_ARGUMENTS {
-        return CallOutcome {
-            result: Err(SysError::InvalidArgument {
+        return fail_detached(
+            tid,
+            SysError::InvalidArgument {
                 index: MAX_ARGUMENTS,
                 reason: "at most six arguments are supported",
-            }),
-            cleanup: linux::detach(tid).err(),
-        };
+            },
+        );
     }
-    let arguments = match x86_args::build(x86_abi(abi), args, wide_arguments) {
+    let arguments = match x86_args::build(X86Abi::from(abi), args, wide_arguments) {
         Ok(layout) => layout,
-        Err(error) => {
-            return CallOutcome {
-                result: Err(map_x86_error(error)),
-                cleanup: linux::detach(tid).err(),
-            };
-        }
+        Err(error) => return fail_detached(tid, error.into()),
     };
     if function > u64::from(u32::MAX) {
-        return CallOutcome {
-            result: Err(SysError::InvalidAddress {
+        return fail_detached(
+            tid,
+            SysError::InvalidAddress {
                 address: function,
                 reason: "the function address does not fit in a 32-bit target",
-            }),
-            cleanup: linux::detach(tid).err(),
-        };
+            },
+        );
     }
     if let Some(safe_point) = safe_point {
         if safe_point > u64::from(u32::MAX) {
-            return CallOutcome {
-                result: Err(SysError::InvalidAddress {
+            return fail_detached(
+                tid,
+                SysError::InvalidAddress {
                     address: safe_point,
                     reason: "the safe point does not fit in a 32-bit target",
-                }),
-                cleanup: linux::detach(tid).err(),
-            };
+                },
+            );
         }
         if safe_point == function {
-            return CallOutcome {
-                result: Err(SysError::InvalidArgument {
+            return fail_detached(
+                tid,
+                SysError::InvalidArgument {
                     index: 0,
                     reason: "the safe point must differ from the function address",
-                }),
-                cleanup: linux::detach(tid).err(),
-            };
+                },
+            );
         }
     }
 
     let initial = match linux::get_registers(tid) {
         Ok(registers) => registers,
-        Err(error) => {
-            return CallOutcome {
-                result: Err(error),
-                cleanup: linux::detach(tid).err(),
-            };
-        }
+        Err(error) => return fail_detached(tid, error),
     };
     let debug = match linux::read_debug_state(tid) {
         Ok(state) => state,
-        Err(error) => {
-            return CallOutcome {
-                result: Err(error),
-                cleanup: linux::detach(tid).err(),
-            };
-        }
+        Err(error) => return fail_detached(tid, error),
     };
     attached.debug = Some(debug);
     // One region snapshot serves the function, the safe point, and the frame.
     let regions = match process.region_map() {
         Ok(regions) => regions,
         Err(source) => {
-            return CallOutcome {
-                result: Err(linux::inspect("Process::region_map")(source)),
-                cleanup: linux::detach(tid).err(),
-            };
+            return fail_detached(tid, crate::inspect("Process::region_map")(source));
         }
     };
     if let Err(error) = linux::ensure_executable(
@@ -383,10 +306,7 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
         function,
         "the function address is not in an executable region",
     ) {
-        return CallOutcome {
-            result: Err(error),
-            cleanup: linux::detach(tid).err(),
-        };
+        return fail_detached(tid, error);
     }
     if let Some(safe_point) = safe_point {
         if let Err(error) = linux::ensure_executable(
@@ -394,10 +314,7 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
             safe_point,
             "the safe point is not in an executable region",
         ) {
-            return CallOutcome {
-                result: Err(error),
-                cleanup: linux::detach(tid).err(),
-            };
+            return fail_detached(tid, error);
         }
     }
 
@@ -408,25 +325,20 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
         Some(safe_point) if initial.cs == CS_I386 && initial.rip == safe_point => {
             match linux::get_fp_state(tid) {
                 Ok(fp) => (initial, fp),
-                Err(error) => {
-                    return CallOutcome {
-                        result: Err(error),
-                        cleanup: linux::detach(tid).err(),
-                    };
-                }
+                Err(error) => return fail_detached(tid, error),
             }
         }
         Some(safe_point) => {
             let slot = match debug::free_slot(debug.dr7) {
                 Some(slot) => slot,
                 None => {
-                    return CallOutcome {
-                        result: Err(SysError::Unsupported {
+                    return fail_detached(
+                        tid,
+                        SysError::Unsupported {
                             operation: "remote call",
                             reason: "the target uses all four hardware debug registers",
-                        }),
-                        cleanup: linux::detach(tid).err(),
-                    };
+                        },
+                    );
                 }
             };
             if let Err(error) = arm(tid, slot, safe_point, debug.dr7) {
@@ -477,12 +389,7 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
             }
             match linux::get_fp_state(tid) {
                 Ok(fp) => (initial, fp),
-                Err(error) => {
-                    return CallOutcome {
-                        result: Err(error),
-                        cleanup: linux::detach(tid).err(),
-                    };
-                }
+                Err(error) => return fail_detached(tid, error),
             }
         }
     };
@@ -545,7 +452,7 @@ fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallO
                 &base,
                 &fp,
                 &debug,
-                linux::inspect("Process::region_map")(source),
+                crate::inspect("Process::region_map")(source),
             );
         }
     };

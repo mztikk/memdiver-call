@@ -107,6 +107,14 @@ impl fmt::Display for OsFailure {
 
 impl StdError for OsFailure {}
 
+/// Wraps a `memdiver` failure with the operation name.
+pub(crate) fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError {
+    move |source| SysError::Inspect {
+        operation,
+        source: Box::new(source),
+    }
+}
+
 /// A failure inside the platform mechanism.
 ///
 /// This type is internal to the `memdiver-call` family: callers see

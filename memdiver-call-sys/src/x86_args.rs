@@ -7,6 +7,9 @@
 //! `ECX`, or the first two `fastcall` arguments) are 32-bit; a wide register
 //! argument is rejected.
 
+use crate::Abi;
+use crate::error::SysError;
+
 /// The calling convention of a 32-bit Windows function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum X86Abi {
@@ -18,6 +21,17 @@ pub(crate) enum X86Abi {
     Thiscall,
     /// First two arguments in `ECX`/`EDX`; the remainder on the stack.
     Fastcall,
+}
+
+impl From<Abi> for X86Abi {
+    fn from(abi: Abi) -> Self {
+        match abi {
+            Abi::Auto | Abi::Cdecl => Self::Cdecl,
+            Abi::Stdcall => Self::Stdcall,
+            Abi::Thiscall => Self::Thiscall,
+            Abi::Fastcall => Self::Fastcall,
+        }
+    }
 }
 
 /// One 32- or 64-bit argument value.
@@ -52,6 +66,29 @@ pub(crate) enum X86Error {
     WideRegister,
     /// A non-wide argument does not fit in 32 bits.
     NarrowValue(usize),
+}
+
+impl From<X86Error> for SysError {
+    fn from(error: X86Error) -> Self {
+        match error {
+            X86Error::Index(index) => Self::InvalidArgument {
+                index,
+                reason: "the wide-argument index is out of range",
+            },
+            X86Error::Duplicate(index) => Self::InvalidArgument {
+                index,
+                reason: "the wide-argument index is repeated",
+            },
+            X86Error::NarrowValue(index) => Self::InvalidArgument {
+                index,
+                reason: "the value does not fit in a 32-bit argument slot",
+            },
+            X86Error::WideRegister => Self::Unsupported {
+                operation: "remote call",
+                reason: "64-bit register arguments are not supported; only stack arguments may be wide",
+            },
+        }
+    }
 }
 
 /// Builds the register and stack placement for `abi`.
@@ -122,6 +159,27 @@ fn narrow(argument: &X86Argument, index: usize) -> Result<u32, X86Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abi_maps_to_x86_conventions() {
+        assert_eq!(X86Abi::from(Abi::Auto), X86Abi::Cdecl);
+        assert_eq!(X86Abi::from(Abi::Cdecl), X86Abi::Cdecl);
+        assert_eq!(X86Abi::from(Abi::Stdcall), X86Abi::Stdcall);
+        assert_eq!(X86Abi::from(Abi::Thiscall), X86Abi::Thiscall);
+        assert_eq!(X86Abi::from(Abi::Fastcall), X86Abi::Fastcall);
+    }
+
+    #[test]
+    fn layout_errors_map_to_mechanism_errors() {
+        assert!(matches!(
+            SysError::from(X86Error::Index(9)),
+            SysError::InvalidArgument { index: 9, .. }
+        ));
+        assert!(matches!(
+            SysError::from(X86Error::WideRegister),
+            SysError::Unsupported { .. }
+        ));
+    }
 
     #[test]
     fn cdecl_places_narrow_arguments_in_order() {

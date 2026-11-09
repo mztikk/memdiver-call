@@ -21,7 +21,7 @@ use memdiver::{Address, Process, RegionMap};
 
 use crate::error::{CallOutcome, CallStatus, OsFailure, SysError};
 use crate::frame::{self, STACK_HEADROOM};
-use crate::{Failures, MAX_ARGUMENTS, debug};
+use crate::{Failures, MAX_ARGUMENTS, debug, inspect};
 
 /// `PTRACE_GETREGSET`/`PTRACE_SETREGSET` identifier for the extended xstate.
 const NT_X86_XSTATE: u32 = 0x202;
@@ -149,6 +149,18 @@ impl Drop for Attached {
 /// [`SysError::Platform`] when `ptrace` fails (for example because another
 /// tracer exists or Yama denies access).
 pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
+    let tid = attach_thread(pid, tid)?;
+    Ok(Attached {
+        tid,
+        armed: true,
+        debug: None,
+    })
+}
+
+/// Attaches to and stops `tid`, returning the Linux thread id.
+///
+/// Shared by the native and the Wine 32-bit guards.
+pub(crate) fn attach_thread(pid: u32, tid: u32) -> Result<libc::pid_t, SysError> {
     if tid != pid {
         return Err(SysError::Unsupported {
             operation: "attach",
@@ -168,11 +180,7 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
         return Err(error);
     }
     match wait_for_initial_stop(tid) {
-        Ok(()) => Ok(Attached {
-            tid,
-            armed: true,
-            debug: None,
-        }),
+        Ok(()) => Ok(tid),
         Err(error) => {
             let _ = detach(tid);
             Err(error)
@@ -971,14 +979,6 @@ pub(crate) fn ensure_frame(
 /// Returns `DR0`–`DR3` offset for `slot`.
 pub(crate) fn debug_register_offset(slot: u8) -> usize {
     DEBUG_REGISTER_BASE + usize::from(slot) * 8
-}
-
-/// Wraps a `memdiver` failure with the operation name.
-pub(crate) fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError {
-    move |source| SysError::Inspect {
-        operation,
-        source: Box::new(source),
-    }
 }
 
 /// Returns the stop signal to deliver when detaching after a failed call.

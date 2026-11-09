@@ -46,16 +46,39 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub mod wine32;
 
+pub(crate) use error::inspect;
 pub use error::{CallOutcome, CallStatus, OsFailure, SysError};
 
 #[cfg(target_os = "linux")]
 pub use linux::{Attached, attach};
 
 #[cfg(windows)]
-pub use windows::{Abi, Execution, call, open_execution};
+pub use windows::{Execution, call, open_execution};
 
 /// The maximum number of `u64` argument slots a call may use.
 pub const MAX_ARGUMENTS: usize = 6;
+
+/// A calling convention for a remote function.
+///
+/// On `x86_64` only [`Abi::Auto`] is valid. On `x86` (native Windows or a
+/// 32-bit Wine target) [`Abi::Auto`] means `cdecl`, and the other conventions
+/// are available.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Abi {
+    /// The platform default: Microsoft `x86_64`, SysV AMD64, or 32-bit
+    /// `cdecl`.
+    #[default]
+    Auto,
+    /// 32-bit `cdecl`.
+    Cdecl,
+    /// 32-bit Windows `stdcall`.
+    Stdcall,
+    /// 32-bit Windows `thiscall` (`this` in `ECX`).
+    Thiscall,
+    /// 32-bit Windows `fastcall` (first two arguments in `ECX`/`EDX`).
+    Fastcall,
+}
 
 /// Reports whether this build can execute a remote call.
 ///

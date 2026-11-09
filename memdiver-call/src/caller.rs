@@ -4,13 +4,10 @@ use std::fmt;
 use std::sync::Mutex;
 
 use memdiver::{Address, PointerWidth, Process, RegionMap};
-use memdiver_call_sys::{CallOutcome, SysError};
+use memdiver_call_sys::{CallOutcome, MAX_ARGUMENTS, SysError};
 
 use crate::error::{Error, PlatformError, status_from_sys};
 use crate::options::{CallAbi, CallOptions};
-
-/// Maximum number of argument slots in v1.
-const MAX_ARGUMENTS: usize = 6;
 
 /// What kind of target a [`RemoteCaller`] is bound to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -641,16 +638,12 @@ fn wine32_call(
     let attached =
         memdiver_call_sys::wine32::attach(pid, tid).map_err(|error| map_open(error, pid))?;
     if !caller.process.is_alive() {
-        return Err(detach_wine32_after(
-            attached,
-            Error::TargetExited { pid },
-            pid,
-        ));
+        return Err(detach_after(attached, Error::TargetExited { pid }, pid));
     }
     let spec = memdiver_call_sys::wine32::CallSpec {
         function: function.get(),
         args,
-        abi: wine_abi(options.abi()),
+        abi: sys_abi(options.abi()),
         wide_arguments: options.wide_arguments(),
         safe_point: options.safe_point().map(Address::get),
         timeout: options.safe_point_timeout(),
@@ -659,19 +652,7 @@ fn wine32_call(
     finish(function, pid, outcome)
 }
 
-/// Maps a `memdiver-call` ABI choice to a 32-bit Windows convention.
-#[cfg(target_os = "linux")]
-fn wine_abi(abi: CallAbi) -> memdiver_call_sys::wine32::WineAbi {
-    match abi {
-        CallAbi::Auto | CallAbi::Cdecl => memdiver_call_sys::wine32::WineAbi::Cdecl,
-        CallAbi::Stdcall => memdiver_call_sys::wine32::WineAbi::Stdcall,
-        CallAbi::Thiscall => memdiver_call_sys::wine32::WineAbi::Thiscall,
-        CallAbi::Fastcall => memdiver_call_sys::wine32::WineAbi::Fastcall,
-    }
-}
-
-/// Maps a `memdiver-call-sys` ABI choice.
-#[cfg(windows)]
+/// Maps a `memdiver-call` ABI choice to the mechanism convention.
 fn sys_abi(abi: CallAbi) -> memdiver_call_sys::Abi {
     match abi {
         CallAbi::Auto => memdiver_call_sys::Abi::Auto,
@@ -874,27 +855,30 @@ fn close_after(execution: memdiver_call_sys::Execution, failure: Error, pid: u32
     }
 }
 
-/// Detaches and keeps both the original failure and any detach failure.
+/// A guard that can release a Linux attachment.
 #[cfg(target_os = "linux")]
-fn detach_after(attached: memdiver_call_sys::Attached, failure: Error, pid: u32) -> Error {
-    match attached.detach() {
-        Ok(()) => failure,
-        Err(cleanup) => Error::Cleanup {
-            function: None,
-            call: Some(Box::new(failure)),
-            cleanup: Box::new(map_cleanup_error(cleanup, pid)),
-        },
+trait Detachable {
+    fn detach_guard(self) -> Result<(), SysError>;
+}
+
+#[cfg(target_os = "linux")]
+impl Detachable for memdiver_call_sys::Attached {
+    fn detach_guard(self) -> Result<(), SysError> {
+        memdiver_call_sys::Attached::detach(self)
     }
 }
 
-/// Detaches a Wine 32-bit attachment and keeps both failures.
 #[cfg(target_os = "linux")]
-fn detach_wine32_after(
-    attached: memdiver_call_sys::wine32::Attached,
-    failure: Error,
-    pid: u32,
-) -> Error {
-    match attached.detach() {
+impl Detachable for memdiver_call_sys::wine32::Attached {
+    fn detach_guard(self) -> Result<(), SysError> {
+        memdiver_call_sys::wine32::Attached::detach(self)
+    }
+}
+
+/// Detaches and keeps both the original failure and any detach failure.
+#[cfg(target_os = "linux")]
+fn detach_after(attached: impl Detachable, failure: Error, pid: u32) -> Error {
+    match attached.detach_guard() {
         Ok(()) => failure,
         Err(cleanup) => Error::Cleanup {
             function: None,

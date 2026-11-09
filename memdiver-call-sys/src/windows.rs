@@ -24,30 +24,9 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::error::{CallOutcome, CallStatus, OsFailure, SysError};
 use crate::stub::{self, GeneratedStub};
-#[cfg(all(test, target_arch = "x86_64"))]
-use crate::x86_args::X86Abi;
 #[cfg(target_arch = "x86")]
-use crate::x86_args::{self, X86Abi, X86Error};
-use crate::{Failures, MAX_ARGUMENTS};
-
-/// The calling convention of a Windows call.
-///
-/// On `x86_64` only [`Abi::Auto`] is valid. On `x86`, [`Abi::Auto`] means
-/// `cdecl`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Abi {
-    /// The platform default: Microsoft `x86_64` or 32-bit `cdecl`.
-    Auto,
-    /// 32-bit `cdecl`.
-    Cdecl,
-    /// 32-bit `stdcall`.
-    Stdcall,
-    /// 32-bit `thiscall` (`this` in `ECX`).
-    Thiscall,
-    /// 32-bit `fastcall` (first two arguments in `ECX`/`EDX`).
-    Fastcall,
-}
+use crate::x86_args::{self, X86Abi};
+use crate::{Abi, Failures, MAX_ARGUMENTS, inspect};
 
 /// An execution handle that pins the target process.
 ///
@@ -473,47 +452,13 @@ fn generate(
         reason: "the result address does not fit in a 32-bit target",
     })?;
 
-    let layout = x86_args::build(map_abi(abi), args, wide_arguments).map_err(map_x86_error)?;
+    let layout = x86_args::build(X86Abi::from(abi), args, wide_arguments)?;
     Ok(stub::build_x86(
         stub_address,
         function,
         result_address,
         &layout,
     ))
-}
-
-/// Maps a 32-bit argument-layout failure to a mechanism error.
-#[cfg(target_arch = "x86")]
-fn map_x86_error(error: X86Error) -> SysError {
-    match error {
-        X86Error::Index(index) => SysError::InvalidArgument {
-            index,
-            reason: "the wide-argument index is out of range",
-        },
-        X86Error::Duplicate(index) => SysError::InvalidArgument {
-            index,
-            reason: "the wide-argument index is repeated",
-        },
-        X86Error::NarrowValue(index) => SysError::InvalidArgument {
-            index,
-            reason: "the value does not fit in a 32-bit argument slot",
-        },
-        X86Error::WideRegister => SysError::Unsupported {
-            operation: "remote call",
-            reason: "64-bit register arguments are not supported; only stack arguments may be wide",
-        },
-    }
-}
-
-/// Maps the public ABI to the 32-bit calling conventions.
-#[cfg(any(target_arch = "x86", test))]
-fn map_abi(abi: Abi) -> X86Abi {
-    match abi {
-        Abi::Auto | Abi::Cdecl => X86Abi::Cdecl,
-        Abi::Stdcall => X86Abi::Stdcall,
-        Abi::Thiscall => X86Abi::Thiscall,
-        Abi::Fastcall => X86Abi::Fastcall,
-    }
 }
 
 /// Reads `{ result: u64, completed: u64 }` from the result allocation.
@@ -564,28 +509,4 @@ fn os_failure(operation: &'static str) -> OsFailure {
         .raw_os_error()
         .map_or(-1, i64::from);
     OsFailure::new(operation, code)
-}
-
-/// Wraps a `memdiver` failure with the operation name.
-fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -> SysError {
-    move |source| SysError::Inspect {
-        operation,
-        source: Box::new(source),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn abi_maps_to_32_bit_conventions() {
-        // This mapping is only used on x86; the free function below exists so
-        // the translation is unit-testable on any host.
-        assert_eq!(map_abi(Abi::Auto), X86Abi::Cdecl);
-        assert_eq!(map_abi(Abi::Cdecl), X86Abi::Cdecl);
-        assert_eq!(map_abi(Abi::Stdcall), X86Abi::Stdcall);
-        assert_eq!(map_abi(Abi::Thiscall), X86Abi::Thiscall);
-        assert_eq!(map_abi(Abi::Fastcall), X86Abi::Fastcall);
-    }
 }
