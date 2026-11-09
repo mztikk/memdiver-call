@@ -4,12 +4,6 @@
 //! `ESP % 16 == 12`, the return address is at `[ESP]`, and the arguments are at
 //! `[ESP+4]`, `[ESP+8]`, and so on.
 
-/// Bytes of writable stack that must remain below the call frame.
-///
-/// This is a guard band, not a proof that the callee's stack usage fits.
-#[cfg(target_os = "linux")]
-pub(crate) const STACK_HEADROOM: u64 = 4096;
-
 /// A validated 32-bit call frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameLayout {

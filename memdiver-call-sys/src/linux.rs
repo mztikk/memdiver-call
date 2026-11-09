@@ -15,10 +15,10 @@
 use std::io;
 use std::mem::MaybeUninit;
 
-use memdiver::{Address, Process};
+use memdiver::{Address, Process, RegionMap};
 
 use crate::error::{CallOutcome, CallStatus, OsFailure, SysError};
-use crate::frame::{self, FrameLayout, STACK_HEADROOM};
+use crate::frame::{self, STACK_HEADROOM};
 use crate::{Failures, MAX_ARGUMENTS, debug};
 
 /// `PTRACE_GETREGSET`/`PTRACE_SETREGSET` identifier for the extended xstate.
@@ -202,13 +202,17 @@ fn execute(
     saved: &libc::user_regs_struct,
     saved_debug: &DebugState,
 ) -> Result<u64, SysError> {
+    // One region snapshot serves every address check in this call.
+    let regions = process
+        .region_map()
+        .map_err(inspect("Process::region_map"))?;
     ensure_executable(
-        process,
+        &regions,
         function,
         "the function address is not in an executable region",
     )?;
     ensure_executable(
-        process,
+        &regions,
         saved.rip,
         "the interrupted instruction pointer is not in an executable region",
     )?;
@@ -217,7 +221,7 @@ fn execute(
         address: saved.rsp,
         reason: "the stack pointer is too low for a call frame",
     })?;
-    ensure_frame(process, layout)?;
+    ensure_frame(&regions, layout.frame, layout.end, saved.rsp)?;
 
     let slot = debug::free_slot(saved_debug.dr7).ok_or(SysError::Unsupported {
         operation: "remote call",
@@ -665,56 +669,58 @@ fn shadow_stack_enabled(status: &str) -> bool {
 
 /// Verifies that `address` is in an executable region.
 pub(crate) fn ensure_executable(
-    process: &Process,
+    regions: &RegionMap,
     address: u64,
     reason: &'static str,
 ) -> Result<(), SysError> {
-    match process.region_at(Address::new(address)) {
-        Ok(Some(region)) if region.is_executable() => Ok(()),
-        Ok(Some(_)) => Err(SysError::InvalidAddress { address, reason }),
-        Ok(None) => Err(SysError::InvalidAddress {
+    match regions.find(Address::new(address)) {
+        Some(region) if region.is_executable() => Ok(()),
+        Some(_) => Err(SysError::InvalidAddress { address, reason }),
+        None => Err(SysError::InvalidAddress {
             address,
             reason: "the address is not in a mapped region",
-        }),
-        Err(source) => Err(SysError::Inspect {
-            operation: "Process::region_at",
-            source: Box::new(source),
         }),
     }
 }
 
-/// Verifies that the whole frame is writable and far enough above the guard.
-fn ensure_frame(process: &Process, layout: FrameLayout) -> Result<(), SysError> {
-    let region = match process.region_at(Address::new(layout.frame)) {
-        Ok(Some(region)) => region,
-        Ok(None) => {
-            return Err(SysError::InvalidAddress {
-                address: layout.frame,
-                reason: "the call frame is not in a mapped region",
-            });
-        }
-        Err(source) => {
-            return Err(SysError::Inspect {
-                operation: "Process::region_at",
-                source: Box::new(source),
-            });
-        }
+/// Verifies that the whole frame is in the interrupted stack region and writable.
+///
+/// The frame must be in the same region as `saved_sp`: a frame that crosses into
+/// an adjacent writable mapping would otherwise pass the writability checks and
+/// corrupt that mapping.
+pub(crate) fn ensure_frame(
+    regions: &RegionMap,
+    frame: u64,
+    end: u64,
+    saved_sp: u64,
+) -> Result<(), SysError> {
+    let Some(region) = regions.find(Address::new(frame)) else {
+        return Err(SysError::InvalidAddress {
+            address: frame,
+            reason: "the call frame is not in a mapped region",
+        });
     };
+    if !region.contains(Address::new(saved_sp)) {
+        return Err(SysError::InvalidAddress {
+            address: frame,
+            reason: "the call frame is not in the stack region",
+        });
+    }
     if !region.is_writable() {
         return Err(SysError::InvalidAddress {
-            address: layout.frame,
+            address: frame,
             reason: "the call frame is not writable",
         });
     }
-    if layout.frame.saturating_sub(region.base().get()) < STACK_HEADROOM {
+    if frame.saturating_sub(region.base().get()) < STACK_HEADROOM {
         return Err(SysError::InvalidAddress {
-            address: layout.frame,
+            address: frame,
             reason: "there is not enough stack headroom below the call frame",
         });
     }
-    if layout.end > region.end().get() {
+    if end > region.end().get() {
         return Err(SysError::InvalidAddress {
-            address: layout.frame,
+            address: frame,
             reason: "the call frame crosses a region boundary",
         });
     }

@@ -29,7 +29,7 @@ use memdiver::{Address, Process};
 
 use crate::debug;
 use crate::error::{CallOutcome, CallStatus, SysError};
-use crate::frame_x86::{self, FrameLayout, STACK_HEADROOM};
+use crate::frame_x86;
 use crate::linux::{self, DebugState, FpState};
 use crate::x86_args::{self, X86Abi, X86Error};
 use crate::{Failures, MAX_ARGUMENTS};
@@ -355,8 +355,18 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
             };
         }
     };
+    // One region snapshot serves the function, the safe point, and the frame.
+    let regions = match process.region_map() {
+        Ok(regions) => regions,
+        Err(source) => {
+            return CallOutcome {
+                result: Err(linux::inspect("Process::region_map")(source)),
+                cleanup: linux::detach(tid).err(),
+            };
+        }
+    };
     if let Err(error) = linux::ensure_executable(
-        process,
+        &regions,
         function,
         "the function address is not in an executable region",
     ) {
@@ -367,7 +377,7 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
     }
     if let Some(safe_point) = safe_point {
         if let Err(error) = linux::ensure_executable(
-            process,
+            &regions,
             safe_point,
             "the safe point is not in an executable region",
         ) {
@@ -512,7 +522,21 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
             );
         }
     };
-    if let Err(error) = ensure_frame(process, frame) {
+    // The safe-point wait can last seconds, so the frame check takes a fresh
+    // snapshot instead of reusing the pre-wait one.
+    let frame_regions = match process.region_map() {
+        Ok(regions) => regions,
+        Err(source) => {
+            return fail_state(
+                tid,
+                &base,
+                &fp,
+                &debug,
+                linux::inspect("Process::region_map")(source),
+            );
+        }
+    };
+    if let Err(error) = linux::ensure_frame(&frame_regions, frame.frame, frame.end, base.rsp) {
         return fail_state(tid, &base, &fp, &debug, error);
     }
 
@@ -752,42 +776,4 @@ fn fail_state(
         result: Err(error),
         cleanup,
     }
-}
-
-/// Verifies that the whole frame is writable and far enough above the guard.
-fn ensure_frame(process: &Process, layout: FrameLayout) -> Result<(), SysError> {
-    let region = match process.region_at(Address::new(layout.frame)) {
-        Ok(Some(region)) => region,
-        Ok(None) => {
-            return Err(SysError::InvalidAddress {
-                address: layout.frame,
-                reason: "the call frame is not in a mapped region",
-            });
-        }
-        Err(source) => {
-            return Err(SysError::Inspect {
-                operation: "Process::region_at",
-                source: Box::new(source),
-            });
-        }
-    };
-    if !region.is_writable() {
-        return Err(SysError::InvalidAddress {
-            address: layout.frame,
-            reason: "the call frame is not writable",
-        });
-    }
-    if layout.frame.saturating_sub(region.base().get()) < STACK_HEADROOM {
-        return Err(SysError::InvalidAddress {
-            address: layout.frame,
-            reason: "there is not enough stack headroom below the call frame",
-        });
-    }
-    if layout.end > region.end().get() {
-        return Err(SysError::InvalidAddress {
-            address: layout.frame,
-            reason: "the call frame crosses a region boundary",
-        });
-    }
-    Ok(())
 }

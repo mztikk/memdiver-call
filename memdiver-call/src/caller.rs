@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Mutex;
 
-use memdiver::{Address, PointerWidth, Process};
+use memdiver::{Address, PointerWidth, Process, RegionMap};
 use memdiver_call_sys::{CallOutcome, SysError};
 
 use crate::error::{Error, PlatformError, status_from_sys};
@@ -245,9 +245,11 @@ impl RemoteCaller {
                 reason: "at most six arguments are supported",
             });
         }
+        // One region snapshot serves every address check in this call.
+        let regions = self.region_map()?;
         match self.kind {
-            TargetKind::Wine32 => self.validate_wine32(function, args, options),
-            _ => self.validate_native(function, args, options),
+            TargetKind::Wine32 => self.validate_wine32(function, args, options, &regions),
+            _ => self.validate_native(function, args, options, &regions),
         }
     }
 
@@ -257,6 +259,7 @@ impl RemoteCaller {
         function: Address,
         args: &[u64],
         options: &CallOptions,
+        regions: &RegionMap,
     ) -> Result<(), Error> {
         let _ = args;
         if options.safe_point().is_some() {
@@ -299,7 +302,7 @@ impl RemoteCaller {
                 });
             }
         }
-        self.require_executable(function)
+        self.require_executable(regions, function)
     }
 
     /// Validation for a 32-bit Windows PE under Wine.
@@ -308,6 +311,7 @@ impl RemoteCaller {
         function: Address,
         args: &[u64],
         options: &CallOptions,
+        regions: &RegionMap,
     ) -> Result<(), Error> {
         if function.is_null() {
             return Err(Error::InvalidAddress {
@@ -357,26 +361,30 @@ impl RemoteCaller {
                     reason: "the safe point must differ from the function address",
                 });
             }
-            self.require_executable(safe_point)?;
+            self.require_executable(regions, safe_point)?;
         }
-        self.require_executable(function)
+        self.require_executable(regions, function)
+    }
+
+    /// Snapshots the target's regions once for this call.
+    fn region_map(&self) -> Result<RegionMap, Error> {
+        self.process.region_map().map_err(|source| Error::Memory {
+            operation: "Process::region_map",
+            source: Box::new(source),
+        })
     }
 
     /// Verifies that `address` is in an executable live region.
-    fn require_executable(&self, address: Address) -> Result<(), Error> {
-        match self.process.region_at(address) {
-            Ok(Some(region)) if region.is_executable() => Ok(()),
-            Ok(Some(_)) => Err(Error::InvalidAddress {
+    fn require_executable(&self, regions: &RegionMap, address: Address) -> Result<(), Error> {
+        match regions.find(address) {
+            Some(region) if region.is_executable() => Ok(()),
+            Some(_) => Err(Error::InvalidAddress {
                 address,
                 reason: "the address is not in an executable region",
             }),
-            Ok(None) => Err(Error::InvalidAddress {
+            None => Err(Error::InvalidAddress {
                 address,
                 reason: "the address is not in a live region",
-            }),
-            Err(source) => Err(Error::Memory {
-                operation: "Process::region_at",
-                source: Box::new(source),
             }),
         }
     }
