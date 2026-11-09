@@ -19,6 +19,8 @@ pub(crate) struct Fixture {
     pub(crate) store: u64,
     /// Address of `fixture_ping`.
     pub(crate) ping: u64,
+    /// Address of `fixture_flag`, which returns a 32-bit value.
+    pub(crate) flag: u64,
     /// Address of `fixture_exit`.
     pub(crate) exit: u64,
     /// Address of the fixture's scratch buffer.
@@ -106,6 +108,7 @@ impl Fixture {
             mix: number("mix"),
             store: number("store"),
             ping: number("ping"),
+            flag: number("flag"),
             exit: number("exit"),
             buffer: number("buffer"),
             data: number("data"),

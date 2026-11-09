@@ -61,6 +61,19 @@ fn zero_argument_call_returns_the_integer_result() {
 }
 
 #[test]
+fn narrow_return_value_is_read_from_the_low_bits() {
+    let mut fixture = Fixture::spawn();
+    let caller = open(&fixture);
+    let raw = caller
+        .call(Address::new(fixture.flag), &[], &CallOptions::new())
+        .expect("flag");
+    // The ABI does not define the upper half for a 32-bit return (EDX on x86,
+    // the upper RAX bits on x86_64), so the documented contract is a cast.
+    assert_eq!(raw as u32, 1);
+    fixture.ping();
+}
+
+#[test]
 fn pointer_argument_writes_target_memory() {
     let mut fixture = Fixture::spawn();
     let caller = open(&fixture);

@@ -35,6 +35,28 @@
 //!
 //! Everything else returns [`Error::Unsupported`] or is not part of the API.
 //!
+//! # Return values
+//!
+//! The result is the raw 64-bit return value: `RAX` on `x86_64`, `EDX:EAX` on
+//! `x86`. Only the bits belonging to the function's declared return type are
+//! defined. A function returning a 32-bit `BOOL`, `int`, or `HRESULT` may
+//! leave the upper half unspecified — the upper 32 bits of `RAX` on `x86_64`,
+//! and `EDX` on `x86` — so cast the result to the declared type before
+//! comparing it:
+//!
+//! ```no_run
+//! # use memdiver::Address;
+//! # use memdiver_call::{CallOptions, RemoteCaller};
+//! # fn main() -> Result<(), memdiver_call::Error> {
+//! # let caller = RemoteCaller::open(4242)?;
+//! let raw = caller.call(Address::new(0x1400_0100), &[], &CallOptions::new())?;
+//! let ok = raw as u32 != 0; // a function returning a 32-bit `BOOL`
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A function returning a 64-bit integer uses the full value.
+//!
 //! # Wine 32-bit targets
 //!
 //! [`RemoteCaller::open_wine`] calls into a 32-bit Windows PE that Wine hosts

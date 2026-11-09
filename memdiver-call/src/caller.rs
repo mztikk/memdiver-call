@@ -143,6 +143,10 @@ impl RemoteCaller {
 
     /// Calls `function` with up to six `u64` argument slots.
     ///
+    /// The result is the raw 64-bit return value. For a return type narrower
+    /// than 64 bits, cast it to the declared type before comparing it: the
+    /// upper bits are unspecified on `x86_64` and come from `EDX` on `x86`.
+    ///
     /// Pointer arguments are raw target addresses. The caller owns the
     /// pointed-to memory and its lifetime; v1 does not copy strings, structs, or
     /// buffers into the target.

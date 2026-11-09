@@ -99,6 +99,13 @@ pub extern "C" fn fixture_ping() -> u64 {
     PING_VALUE
 }
 
+/// Returns a 32-bit value; the upper half of the `u64` result is unspecified.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn fixture_flag() -> u32 {
+    1
+}
+
 /// One iteration of the fixture's frame loop.
 ///
 /// Its entry is used as the safe point for the Wine 32-bit tests: the spin
@@ -181,12 +188,13 @@ fn address_of(pointer: *const ()) -> u64 {
 fn main() {
     #[allow(unused_mut)] // mutated only on Windows x86
     let mut ready = format!(
-        "READY pid={} add={:#x} mix={:#x} store={:#x} ping={:#x} exit={:#x} buffer={:#x} data={:#x}",
+        "READY pid={} add={:#x} mix={:#x} store={:#x} ping={:#x} flag={:#x} exit={:#x} buffer={:#x} data={:#x}",
         std::process::id(),
         address_of(fixture_add as *const ()),
         address_of(fixture_mix as *const ()),
         address_of(fixture_store as *const ()),
         address_of(fixture_ping as *const ()),
+        address_of(fixture_flag as *const ()),
         address_of(fixture_exit as *const ()),
         address_of(std::ptr::addr_of!(BUFFER).cast()),
         address_of(std::ptr::addr_of!(FIXTURE_DATA).cast()),

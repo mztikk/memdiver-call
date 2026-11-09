@@ -82,11 +82,14 @@ except for the explicit native-Linux-to-Wine-`x86` mode below.
 | `call_export` | no; pass the function address |
 | Host | Linux `x86_64` only |
 
-### Return values on Windows `x86`
+### Return values
 
-The generated 32-bit stub stores `EDX:EAX` as the `u64` result. For a function
-that returns a 32-bit integer, only the low 32 bits are meaningful; use the low
-half. A function returning a 64-bit integer uses the full value.
+The result is the raw 64-bit return register(s): `RAX` on `x86_64`, `EDX:EAX`
+on `x86`. Only the bits belonging to the function's declared return type are
+defined. A function returning a 32-bit value (`BOOL`, `int`, `HRESULT`, ...)
+may leave the upper half unspecified — the upper 32 bits of `RAX` on `x86_64`,
+and `EDX` on `x86` — so cast the result to the declared type before comparing
+it. A function returning a 64-bit integer uses the full value.
 
 On a 32-bit target, a 64-bit argument occupies two 32-bit stack slots, low word
 first, and is declared with `CallOptions::with_wide_arguments`. Register
