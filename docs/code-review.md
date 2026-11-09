@@ -872,7 +872,10 @@ Verification on the upgraded tree (Linux 7.3.3, stable Rust 1.99.1):
 * `cargo clippy --workspace --all-targets --target i686-pc-windows-gnu
   --locked -- -D warnings`
 * `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
-* `cargo package --list --locked --allow-dirty` for both published crates
+* `cargo package --list --locked` for both published crates
 
 MSRV 1.85 is not installed locally (the toolchain cannot be installed in this
 sandbox); CI runs it. `memdiver` 0.3.0 declares the same MSRV, 1.85.
+
+The release was published as `memdiver-call` 0.3.0 and `memdiver-call-sys` 0.3.0
+on crates.io, tagged `v0.3.0`.
