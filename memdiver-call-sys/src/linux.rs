@@ -95,6 +95,8 @@ pub(crate) const DR7_OFFSET: usize = DEBUG_REGISTER_BASE + 7 * 8;
 pub struct Attached {
     tid: libc::pid_t,
     armed: bool,
+    /// The debug-register state to restore if the call unwinds.
+    debug: Option<DebugState>,
 }
 
 impl Attached {
@@ -104,8 +106,9 @@ impl Attached {
     /// The result and any cleanup failure are returned separately; see
     /// [`CallOutcome`].
     pub fn call(mut self, process: &Process, function: u64, args: &[u64]) -> CallOutcome {
+        let outcome = run(&mut self, process, function, args);
         self.armed = false;
-        run(self.tid, process, function, args)
+        outcome
     }
 
     /// Detaches without running a call.
@@ -113,7 +116,8 @@ impl Attached {
     /// # Errors
     ///
     /// Returns the operating-system failure when `PTRACE_DETACH` fails. A
-    /// target that already exited (`ESRCH`) is treated as detached.
+    /// target that already exited (`ESRCH`) is treated as detached, but a
+    /// target that is merely running is reported instead.
     pub fn detach(mut self) -> Result<(), SysError> {
         self.armed = false;
         detach(self.tid)
@@ -123,6 +127,11 @@ impl Attached {
 impl Drop for Attached {
     fn drop(&mut self) {
         if self.armed {
+            // Panic safety: restore the debug registers if the call armed them
+            // before unwinding, then detach.
+            if let Some(debug) = &self.debug {
+                let _ = restore_debug_state(self.tid, debug);
+            }
             let _ = detach(self.tid);
         }
     }
@@ -159,7 +168,11 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
         return Err(error);
     }
     match wait_for_initial_stop(tid) {
-        Ok(()) => Ok(Attached { tid, armed: true }),
+        Ok(()) => Ok(Attached {
+            tid,
+            armed: true,
+            debug: None,
+        }),
         Err(error) => {
             let _ = detach(tid);
             Err(error)
@@ -168,7 +181,7 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
 }
 
 /// Saved debug-register state.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct DebugState {
     pub(crate) slots: [u64; 4],
     pub(crate) dr6: u64,
@@ -241,7 +254,8 @@ fn allocation_error(reason: &'static str) -> SysError {
 }
 
 /// Runs a call on a stopped thread and always attempts restore and detach.
-fn run(tid: libc::pid_t, process: &Process, function: u64, args: &[u64]) -> CallOutcome {
+fn run(attached: &mut Attached, process: &Process, function: u64, args: &[u64]) -> CallOutcome {
+    let tid = attached.tid;
     let saved_registers = match get_registers(tid) {
         Ok(registers) => registers,
         Err(error) => {
@@ -269,6 +283,7 @@ fn run(tid: libc::pid_t, process: &Process, function: u64, args: &[u64]) -> Call
             };
         }
     };
+    attached.debug = Some(saved_debug);
 
     let result = execute(tid, process, function, args, &saved_registers, &saved_debug);
     let deliver = deliver_on_detach(&result);

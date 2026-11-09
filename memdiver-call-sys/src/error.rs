@@ -10,6 +10,7 @@ use std::time::Duration;
 /// failure to restore the target never hides a failed call, and a successful
 /// call never becomes `Ok` when the target was left in a modified state.
 #[derive(Debug)]
+#[must_use = "a call outcome may contain a cleanup failure"]
 pub struct CallOutcome {
     /// The call result, or the reason the call failed.
     pub result: Result<u64, SysError>,

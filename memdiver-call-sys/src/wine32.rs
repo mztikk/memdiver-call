@@ -100,6 +100,8 @@ pub struct CallSpec<'a> {
 pub struct Attached {
     tid: libc::pid_t,
     armed: bool,
+    /// The debug-register state to restore if the call unwinds.
+    debug: Option<DebugState>,
 }
 
 impl Attached {
@@ -114,8 +116,9 @@ impl Attached {
     /// The request's `timeout` bounds the safe-point wait, not the call
     /// itself.
     pub fn call(mut self, process: &Process, spec: &CallSpec<'_>) -> CallOutcome {
+        let outcome = run(&mut self, process, spec);
         self.armed = false;
-        run(self.tid, process, spec)
+        outcome
     }
 
     /// Detaches without running a call.
@@ -123,7 +126,8 @@ impl Attached {
     /// # Errors
     ///
     /// Returns the operating-system failure when `PTRACE_DETACH` fails. A
-    /// target that already exited is treated as detached.
+    /// target that already exited is treated as detached, but a target that is
+    /// merely running is reported instead.
     pub fn detach(mut self) -> Result<(), SysError> {
         self.armed = false;
         linux::detach(self.tid)
@@ -133,6 +137,9 @@ impl Attached {
 impl Drop for Attached {
     fn drop(&mut self) {
         if self.armed {
+            if let Some(debug) = &self.debug {
+                let _ = linux::restore_debug_state(self.tid, debug);
+            }
             let _ = linux::detach(self.tid);
         }
     }
@@ -164,7 +171,11 @@ pub fn attach(pid: u32, tid: u32) -> Result<Attached, SysError> {
         return Err(error);
     }
     match linux::wait_for_initial_stop(tid) {
-        Ok(()) => Ok(Attached { tid, armed: true }),
+        Ok(()) => Ok(Attached {
+            tid,
+            armed: true,
+            debug: None,
+        }),
         Err(error) => {
             let _ = linux::detach(tid);
             Err(error)
@@ -280,7 +291,8 @@ fn map_x86_error(error: X86Error) -> SysError {
 }
 
 /// Runs a call on a stopped Wine thread and always attempts restore/detach.
-fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome {
+fn run(attached: &mut Attached, process: &Process, spec: &CallSpec<'_>) -> CallOutcome {
+    let tid = attached.tid;
     let CallSpec {
         function,
         args,
@@ -355,6 +367,7 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
             };
         }
     };
+    attached.debug = Some(debug);
     // One region snapshot serves the function, the safe point, and the frame.
     let regions = match process.region_map() {
         Ok(regions) => regions,
