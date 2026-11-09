@@ -4,6 +4,24 @@ All notable changes to `memdiver-call` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-09
+
+### Changed
+
+- Upgrade the public `memdiver` dependency from 0.2 to 0.3.0. `memdiver-call`
+  re-exports `memdiver::Address` and `memdiver::Process`, so downstream crates
+  must also use `memdiver` 0.3. The richer error context added in 0.3 (`pid`,
+  address, length, and operating-system sources) is preserved unchanged in
+  `Error::Open` and `Error::Memory` sources.
+
+### Fixed
+
+- Preserve the documented `Error::TargetExited` result when the memory handle
+  cannot be opened because the process is gone. `memdiver` 0.3 reports a missing
+  PID as `ProcessNotFound` and a terminated process as `ProcessExited`; both were
+  previously folded into `Error::Open`. The public API and call mechanism are
+  otherwise unchanged.
+
 ## [0.2.0] - 2026-11-09
 
 ### Fixed

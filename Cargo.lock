@@ -45,16 +45,16 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memdiver"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bec9b149cdd772dda2b9c9624328b6395e625cb46ded1dd13f453a54b3ced5a3"
+checksum = "5e26d103fcf8dd7e371a973cd32ee5db07b6008c251fd959c6f215027f5aadd5"
 dependencies = [
  "memdiver-core",
 ]
 
 [[package]]
 name = "memdiver-call"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "memdiver",
  "memdiver-call-sys",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "memdiver-call-sys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "memdiver",
@@ -80,9 +80,9 @@ dependencies = [
 
 [[package]]
 name = "memdiver-core"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9370e7a1800f637e80557820239f5cdeb24857fa32ac1d01b3fcc92fcb9ace4b"
+checksum = "a26cdfd940f4fb494e65a2f42f3e574b7f3734b5148c3ae368dbdb3239dac41c"
 dependencies = [
  "bytemuck",
  "goblin",
@@ -93,9 +93,9 @@ dependencies = [
 
 [[package]]
 name = "memdiver-sys"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f1b9099fbc5f48da47e9e828e7b5052dc34d3aa8c739f9fa92ac7d9e7e0b169"
+checksum = "8ec055c1fb490a9579912639e886625a896e3dce3f84357620cc3c4df3b022ab"
 dependencies = [
  "bitflags",
  "libc",

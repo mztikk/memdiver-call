@@ -4,6 +4,10 @@
 > its task prompt. It is self-contained. The agent must read the entire brief
 > before writing code, work autonomously, create its own repository/workspace,
 > and report back with the evidence listed at the end.
+>
+> **Version note:** the `memdiver = "0.2"` requirement below is the original
+> brief. The workspace was upgraded to `memdiver = "0.3"` after the 0.3.0
+> release; see `memdiver-call/CHANGELOG.md` and `docs/code-review.md`.
 
 **Working name:** `memdiver-call` (safe crate) with `memdiver-call-sys`
 (platform crate). If either name is unavailable on crates.io, choose a close

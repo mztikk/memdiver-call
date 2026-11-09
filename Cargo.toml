@@ -3,7 +3,7 @@ members = ["memdiver-call", "memdiver-call-sys", "memdiver-call-tests"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -15,9 +15,9 @@ categories = ["os", "api-bindings", "development-tools::debugging"]
 
 [workspace.dependencies]
 libc = "0.2"
-memdiver = "0.2"
-memdiver-call = { version = "0.2.0", path = "memdiver-call" }
-memdiver-call-sys = { version = "0.2.0", path = "memdiver-call-sys" }
+memdiver = "0.3"
+memdiver-call = { version = "0.3.0", path = "memdiver-call" }
+memdiver-call-sys = { version = "0.3.0", path = "memdiver-call-sys" }
 windows-sys = { version = "0.59", default-features = false }
 
 [workspace.lints.rust]

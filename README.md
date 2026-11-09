@@ -5,7 +5,7 @@ An independent implementation of remote function calls on top of
 local process on Linux `x86_64` and Windows `x86_64`/`x86`.
 
 This repository is **not** a member of the `memdiver` workspace. It depends on
-the published `memdiver = "0.2"` facade only and does not modify, fork, vendor,
+the published `memdiver = "0.3"` facade only and does not modify, fork, vendor,
 or patch `memdiver`.
 
 ## Layout

@@ -434,12 +434,7 @@ fn open_pinned(pid: u32) -> Result<RemoteCaller, Error> {
     let process = match Process::open(pid) {
         Ok(process) => process,
         Err(source) => {
-            let failure = Error::Open {
-                pid,
-                operation: "memdiver::Process::open",
-                source: Box::new(source),
-            };
-            return Err(close_after(execution, failure, pid));
+            return Err(close_after(execution, map_process_open(source, pid), pid));
         }
     };
     if !process.is_alive() {
@@ -463,12 +458,7 @@ fn open_pinned(pid: u32) -> Result<RemoteCaller, Error> {
     let process = match Process::open(pid) {
         Ok(process) => process,
         Err(source) => {
-            let failure = Error::Open {
-                pid,
-                operation: "memdiver::Process::open",
-                source: Box::new(source),
-            };
-            return Err(detach_after(attached, failure, pid));
+            return Err(detach_after(attached, map_process_open(source, pid), pid));
         }
     };
     if !process.is_alive() {
@@ -541,11 +531,7 @@ fn adopt(process: Process) -> Result<RemoteCaller, Error> {
 /// Opens the PE-hosting process of a 32-bit Windows target under Wine.
 #[cfg(target_os = "linux")]
 fn open_wine_pinned(pid: u32) -> Result<RemoteCaller, Error> {
-    let process = Process::open(pid).map_err(|source| Error::Open {
-        pid,
-        operation: "memdiver::Process::open",
-        source: Box::new(source),
-    })?;
+    let process = Process::open(pid).map_err(|source| map_process_open(source, pid))?;
     adopt_wine(process)
 }
 
@@ -785,6 +771,35 @@ fn finish(function: Address, pid: u32, outcome: CallOutcome) -> Result<u64, Erro
     }
 }
 
+/// Maps a failure while opening the `memdiver` memory handle.
+///
+/// `memdiver` 0.3 reports a missing PID as `ProcessNotFound` and an already
+/// terminated process as `Error::Open` with a `ProcessExited` operating-system
+/// source. Both mean the caller cannot pin a live target instance, so they keep
+/// the documented [`Error::TargetExited`] contract instead of becoming
+/// [`Error::Open`].
+fn map_process_open(source: memdiver::Error, pid: u32) -> Error {
+    if target_is_gone(&source) {
+        return Error::TargetExited { pid };
+    }
+    Error::Open {
+        pid,
+        operation: "memdiver::Process::open",
+        source: Box::new(source),
+    }
+}
+
+/// Returns whether a `memdiver` failure proves that the process instance is
+/// gone rather than merely inaccessible.
+fn target_is_gone(error: &memdiver::Error) -> bool {
+    match error {
+        memdiver::Error::ProcessNotFound { .. } | memdiver::Error::ProcessChanged { .. } => true,
+        _ => std::error::Error::source(error)
+            .and_then(|source| source.downcast_ref::<memdiver::OsError>())
+            .is_some_and(|source| source.kind() == memdiver::OsErrorKind::ProcessExited),
+    }
+}
+
 /// Maps a failure to open the execution resource or memory handle.
 fn map_open(error: SysError, pid: u32) -> Error {
     match error {
@@ -981,6 +996,17 @@ mod tests {
             Error::Cleanup { cleanup, .. } => {
                 assert!(matches!(*cleanup, Error::Leaked { .. }));
             }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_process_is_reported_as_target_exited() {
+        let pid = u32::MAX;
+        let source = Process::open(pid).expect_err("an impossible pid must not open");
+        match map_process_open(source, pid) {
+            Error::TargetExited { pid: reported } => assert_eq!(reported, pid),
             other => panic!("unexpected error: {other:?}"),
         }
     }

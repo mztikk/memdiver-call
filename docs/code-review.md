@@ -826,3 +826,53 @@ The following were run on the final tree (Linux 7.3.3, stable Rust 1.99.1):
 MSRV 1.85 was not re-run offline (the toolchain cannot be installed in this sandbox); CI
 runs it. The release was published as `memdiver-call` 0.2.0 and `memdiver-call-sys` 0.2.0 on
 crates.io, tagged `v0.2.0`.
+
+### memdiver 0.3.0 upgrade (2026-11-09)
+
+`memdiver` 0.3.0 was published on 2026-11-09. The workspace now depends on
+`memdiver = "0.3"`; `Cargo.lock` pins `memdiver`, `memdiver-core`, and
+`memdiver-sys` at 0.3.0. `cargo tree -d` reports no duplicate versions.
+
+Upstream 0.3.0 is semver-incompatible within the 0.x line. Its breaking changes
+are new context fields on `memdiver_core::Error` variants, new fields on
+`memdiver_sys::RawModule`/`RawProcessInfo`, and boxed
+`CodeWriteFailure` sources. This workspace uses only the `memdiver` facade
+(`Address`, `Process`, `RegionMap`, `PointerWidth`, and `Error` as an opaque
+source); it does not pattern-match the changed variants or depend on
+`memdiver-sys`, so the error-context changes need no code changes. The richer
+`pid`, address, length, and operating-system source context added in 0.3 is
+preserved in `Error::Open`/`Error::Memory` sources.
+
+One integration change was needed: on Windows, `memdiver` 0.3 now reports a
+terminated process during `Process::open` as an open error with a
+`ProcessExited` source (0.2 returned a handle whose liveness check failed).
+`RemoteCaller::open` and `RemoteCaller::open_wine` now classify
+`ProcessNotFound` and `ProcessExited` as `Error::TargetExited`, preserving the
+documented contract instead of surfacing `Error::Open`.
+
+`memdiver-call` re-exports `memdiver::Address` and `memdiver::Process`, so
+downstream crates must also move to `memdiver` 0.3. That makes the upgrade a
+breaking change for this workspace's public API, so the release that ships it
+is a new minor version: 0.3.0 under this project's pre-1.0 convention.
+
+Verification on the upgraded tree (Linux 7.3.3, stable Rust 1.99.1):
+
+* `cargo fmt --all -- --check`
+* `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+* `cargo test --workspace --locked` (17 + 43 unit, 22 integration, 2 doc)
+* `cargo test --workspace --release --locked`
+* `cargo test --workspace --target x86_64-pc-windows-gnu --locked` under Wine
+  (20 integration)
+* `cargo test --workspace --target i686-pc-windows-gnu --locked` under Wine
+  (21 integration)
+* `cargo test -p memdiver-call-tests --features wine32-tests --test wine32
+  --locked -- --test-threads=1` under Wine (13 integration)
+* `cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu
+  --locked -- -D warnings`
+* `cargo clippy --workspace --all-targets --target i686-pc-windows-gnu
+  --locked -- -D warnings`
+* `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
+* `cargo package --list --locked --allow-dirty` for both published crates
+
+MSRV 1.85 is not installed locally (the toolchain cannot be installed in this
+sandbox); CI runs it. `memdiver` 0.3.0 declares the same MSRV, 1.85.
