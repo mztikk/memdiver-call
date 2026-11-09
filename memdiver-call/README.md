@@ -388,7 +388,7 @@ Rust 1.85 (edition 2024). Licensed under MIT OR Apache-2.0.
 
 ## Version
 
-`memdiver-call` 0.1.1 and `memdiver-call-sys` 0.1.0 are published on
+`memdiver-call` 0.2.0 and `memdiver-call-sys` 0.2.0 are published on
 crates.io:
 
 * https://crates.io/crates/memdiver-call

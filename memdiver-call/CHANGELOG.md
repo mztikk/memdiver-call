@@ -4,7 +4,7 @@ All notable changes to `memdiver-call` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-09
 
 ### Fixed
 
@@ -31,7 +31,9 @@ All notable changes to `memdiver-call` are documented here. The format follows
 - Use one region-map snapshot per call instead of up to five `region_at`
   calls, and require the call frame to be in the interrupted stack region.
 - One `Abi` enum in `memdiver-call-sys`; `windows::Abi` and `wine32::WineAbi`
-  are merged into it. `memdiver-call-sys::CallStatus` is non-exhaustive.
+  are merged into it. `memdiver-call-sys::CallStatus` is non-exhaustive, and
+  the always-true `is_supported` helper was removed. This is the
+  `memdiver-call-sys` 0.2 API.
 - Re-export `Address` and `Process` from `memdiver-call`; add
   `RemoteCaller::wine_module_base`; the attach guard is panic-safe.
 
