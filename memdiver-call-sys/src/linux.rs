@@ -12,8 +12,10 @@
 //! that may hold locks or own thread-local state; the library cannot make that
 //! transparent. The caller owns the consequences.
 
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::io;
 use std::mem::MaybeUninit;
+use std::sync::OnceLock;
 
 use memdiver::{Address, Process, RegionMap};
 
@@ -46,8 +48,18 @@ const EFLAGS_TF: u64 = 1 << 8;
 /// forever.
 const MAX_SIGNAL_STOPS: usize = 1024;
 
-/// Maximum size of the extended xstate area (`XSAVE`).
-const XSTATE_BUFFER_SIZE: usize = 4096;
+/// Upper bound for the user xstate area this backend is willing to allocate.
+///
+/// The architectural xstate area is currently below 11 KiB (AMX); 64 KiB leaves
+/// room for future components while still refusing an unexpected size instead
+/// of silently truncating it.
+const XSTATE_MAX_SIZE: usize = 64 * 1024;
+
+/// Alignment required by the `XSAVE` area.
+const XSTATE_ALIGN: usize = 64;
+
+/// Size of the legacy x87/SSE register set (`NT_PRFPREG`).
+const FPREGSET_SIZE: usize = std::mem::size_of::<libc::user_fpregs_struct>();
 
 /// Byte offset of `u_debugreg[0]` in `struct user`.
 const DEBUG_REGISTER_BASE: usize = std::mem::offset_of!(libc::user, u_debugreg);
@@ -147,16 +159,70 @@ pub(crate) struct DebugState {
     pub(crate) dr7: u64,
 }
 
+/// How the floating-point/SIMD state is saved on this host.
+#[derive(Clone, Copy, Debug)]
+enum FpLayout {
+    /// The extended `XSAVE` area, with this many bytes.
+    Xstate(usize),
+    /// The legacy x87/SSE register set.
+    Legacy,
+}
+
+/// Cached host floating-point layout, probed on the first call.
+static FP_LAYOUT: OnceLock<FpLayout> = OnceLock::new();
+
 /// Saved floating-point/SIMD register set.
 pub(crate) struct FpState {
-    buffer: Box<AlignedBuffer>,
+    buffer: AlignedBuf,
     len: usize,
     regset: u32,
 }
 
-/// A 64-byte-aligned buffer for the `XSAVE` area.
-#[repr(align(64))]
-struct AlignedBuffer([u8; XSTATE_BUFFER_SIZE]);
+/// A 64-byte-aligned, zeroed buffer for the `XSAVE` area.
+struct AlignedBuf {
+    pointer: std::ptr::NonNull<u8>,
+    layout: Layout,
+}
+
+impl AlignedBuf {
+    /// Allocates a zeroed, 64-byte-aligned buffer of `len` bytes.
+    fn new(len: usize) -> Result<Self, SysError> {
+        debug_assert!(len > 0, "the xstate buffer is never empty");
+        let layout = Layout::from_size_align(len, XSTATE_ALIGN)
+            .map_err(|_| allocation_error("the xstate buffer size is invalid"))?;
+        // SAFETY: `layout` has a non-zero size because every caller passes a
+        // positive length.
+        let pointer = unsafe { alloc_zeroed(layout) };
+        let Some(pointer) = std::ptr::NonNull::new(pointer) else {
+            return Err(allocation_error("the xstate buffer allocation failed"));
+        };
+        Ok(Self { pointer, layout })
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.pointer.as_ptr()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.pointer.as_ptr()
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: `pointer` was allocated with `alloc_zeroed` and `layout`, and
+        // this is its only deallocation.
+        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+
+/// Builds an allocation failure for the floating-point buffer.
+fn allocation_error(reason: &'static str) -> SysError {
+    SysError::Inspect {
+        operation: "allocate the floating-point state buffer",
+        source: Box::new(io::Error::other(reason)),
+    }
+}
 
 /// Runs a call on a stopped thread and always attempts restore and detach.
 fn run(tid: libc::pid_t, process: &Process, function: u64, args: &[u64]) -> CallOutcome {
@@ -471,42 +537,93 @@ pub(crate) fn get_siginfo(tid: libc::pid_t) -> Result<libc::siginfo_t, SysError>
     Ok(unsafe { info.assume_init() })
 }
 
-/// Reads the extended floating-point/SIMD state, falling back to FPREGSET.
-pub(crate) fn get_fp_state(tid: libc::pid_t) -> Result<FpState, SysError> {
-    let mut buffer = Box::new(AlignedBuffer([0u8; XSTATE_BUFFER_SIZE]));
-    let mut last_error = None;
-    for regset in [NT_X86_XSTATE, NT_PRFPREG] {
-        let mut iovec = libc::iovec {
-            iov_base: buffer.0.as_mut_ptr().cast(),
-            iov_len: XSTATE_BUFFER_SIZE,
-        };
-        match regset_request(
-            libc::PTRACE_GETREGSET,
-            tid,
-            regset,
-            &mut iovec,
-            "PTRACE_GETREGSET",
-        ) {
-            Ok(()) => {
-                return Ok(FpState {
-                    buffer,
-                    len: iovec.iov_len,
-                    regset,
+/// Returns the cached floating-point layout, probing it on first use.
+fn fp_layout(tid: libc::pid_t) -> Result<FpLayout, SysError> {
+    if let Some(layout) = FP_LAYOUT.get() {
+        return Ok(*layout);
+    }
+    let layout = probe_fp_layout(tid)?;
+    // A concurrent probe installs the same host-wide value.
+    let _ = FP_LAYOUT.set(layout);
+    Ok(layout)
+}
+
+/// Probes the kernel for the real user-xstate size.
+///
+/// A too-small request is silently truncated by the kernel (the returned
+/// `iov_len` is clamped), while `PTRACE_SETREGSET` later requires exactly the
+/// architectural size, so the size must be learned rather than guessed.
+fn probe_fp_layout(tid: libc::pid_t) -> Result<FpLayout, SysError> {
+    let mut buffer = AlignedBuf::new(XSTATE_MAX_SIZE)?;
+    let mut iovec = libc::iovec {
+        iov_base: buffer.as_mut_ptr().cast(),
+        iov_len: XSTATE_MAX_SIZE,
+    };
+    match regset_request(
+        libc::PTRACE_GETREGSET,
+        tid,
+        NT_X86_XSTATE,
+        &mut iovec,
+        "PTRACE_GETREGSET",
+    ) {
+        Ok(()) => {
+            if iovec.iov_len == 0 || iovec.iov_len >= XSTATE_MAX_SIZE {
+                return Err(SysError::Unsupported {
+                    operation: "PTRACE_GETREGSET",
+                    reason: "the user xstate area is empty or exceeds the 64 KiB probe buffer",
                 });
             }
-            Err(error) => last_error = Some(error),
+            Ok(FpLayout::Xstate(iovec.iov_len))
         }
+        Err(SysError::Platform(failure)) if unsupported_regset(failure.code()) => {
+            Ok(FpLayout::Legacy)
+        }
+        Err(error) => Err(error),
     }
-    Err(last_error.unwrap_or(SysError::Unsupported {
-        operation: "PTRACE_GETREGSET",
-        reason: "the kernel did not provide a floating-point register set",
-    }))
+}
+
+/// Returns `true` when the kernel does not provide the extended xstate set.
+fn unsupported_regset(code: i64) -> bool {
+    code == i64::from(libc::EINVAL)
+        || code == i64::from(libc::EOPNOTSUPP)
+        || code == i64::from(libc::ENODEV)
+}
+
+/// Reads the floating-point/SIMD state using the probed layout.
+pub(crate) fn get_fp_state(tid: libc::pid_t) -> Result<FpState, SysError> {
+    let (regset, len) = match fp_layout(tid)? {
+        FpLayout::Xstate(size) => (NT_X86_XSTATE, size),
+        FpLayout::Legacy => (NT_PRFPREG, FPREGSET_SIZE),
+    };
+    let mut buffer = AlignedBuf::new(len)?;
+    let mut iovec = libc::iovec {
+        iov_base: buffer.as_mut_ptr().cast(),
+        iov_len: len,
+    };
+    regset_request(
+        libc::PTRACE_GETREGSET,
+        tid,
+        regset,
+        &mut iovec,
+        "PTRACE_GETREGSET",
+    )?;
+    if iovec.iov_len != len {
+        return Err(SysError::Unsupported {
+            operation: "PTRACE_GETREGSET",
+            reason: "the kernel returned a different floating-point state size than the probe",
+        });
+    }
+    Ok(FpState {
+        buffer,
+        len,
+        regset,
+    })
 }
 
 /// Writes the saved floating-point/SIMD state.
 pub(crate) fn set_fp_state(tid: libc::pid_t, state: &FpState) -> Result<(), SysError> {
     let mut iovec = libc::iovec {
-        iov_base: state.buffer.0.as_ptr().cast_mut().cast(),
+        iov_base: state.buffer.as_ptr().cast_mut().cast(),
         iov_len: state.len,
     };
     regset_request(
@@ -762,6 +879,24 @@ mod tests {
         assert!(shadow_stack_enabled("x86_Thread_features:\t0x1\n"));
         assert!(shadow_stack_enabled("x86_Thread_features_locked:\t1\n"));
         assert!(shadow_stack_enabled("x86_Thread_features:\tshstk\n"));
+    }
+
+    #[test]
+    fn aligned_xstate_buffer_is_aligned_and_zeroed() {
+        let mut buffer = AlignedBuf::new(2696).expect("buffer");
+        assert_eq!(buffer.as_ptr() as usize % XSTATE_ALIGN, 0);
+        // SAFETY: the buffer is valid for 2696 bytes and was zero-initialized.
+        unsafe {
+            assert_eq!(*buffer.as_mut_ptr(), 0);
+        }
+    }
+
+    #[test]
+    fn unsupported_regset_codes_are_recognized() {
+        assert!(unsupported_regset(i64::from(libc::EINVAL)));
+        assert!(unsupported_regset(i64::from(libc::EOPNOTSUPP)));
+        assert!(unsupported_regset(i64::from(libc::ENODEV)));
+        assert!(!unsupported_regset(i64::from(libc::EPERM)));
     }
 
     #[test]
