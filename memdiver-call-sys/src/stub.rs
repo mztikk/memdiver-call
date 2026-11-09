@@ -54,6 +54,9 @@ pub(crate) fn build_x64(
     debug_assert!(args.len() <= MAX_ARGUMENTS);
 
     let mut bytes = Vec::with_capacity(128);
+    // endbr64: a no-op without CET-IBT, and a valid indirect-branch target
+    // when the stub is entered as the thread start routine.
+    bytes.extend_from_slice(&[0xF3, 0x0F, 0x1E, 0xFA]);
     // sub rsp, 0x38 — shadow space, two stack slots, 16-byte alignment.
     bytes.extend_from_slice(&[0x48, 0x83, 0xEC, 0x38]);
 
@@ -131,6 +134,8 @@ pub(crate) fn build_x86(
     debug_assert!(layout.stack.len() <= 12);
 
     let mut bytes = Vec::with_capacity(96);
+    // endbr32: a no-op without CET-IBT.
+    bytes.extend_from_slice(&[0xF3, 0x0F, 0x1E, 0xFB]);
     // push ebp; mov ebp, esp; and esp, -16
     bytes.extend_from_slice(&[0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0]);
 
@@ -223,6 +228,8 @@ mod tests {
     fn x64_stub_is_byte_exact() {
         let stub = build_x64(0x2000_0000, 0x2000_1000, 0x3000_0000, &[1, 2, 3, 4, 5, 6]);
         let expected: &[u8] = &[
+            // endbr64
+            0xF3, 0x0F, 0x1E, 0xFA, //
             // sub rsp, 0x38
             0x48, 0x83, 0xEC, 0x38, //
             // mov rcx, 1
@@ -239,8 +246,8 @@ mod tests {
             0x48, 0xB8, 6, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0x44, 0x24, 0x28, //
             // xor eax, eax
             0x31, 0xC0, //
-            // call rel32: 0x2000_1000 - (0x2000_0000 + 0x4C + 5) = 0xFAF
-            0xE8, 0xAF, 0x0F, 0x00, 0x00, //
+            // call rel32: 0x2000_1000 - (0x2000_0000 + 0x50 + 5) = 0xFAB
+            0xE8, 0xAB, 0x0F, 0x00, 0x00, //
             // mov [0x3000_0000], rax
             0x48, 0xA3, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, //
             // mov rcx, 0x3000_0008 ; mov qword [rcx], 1
@@ -251,14 +258,14 @@ mod tests {
         ];
         assert_eq!(stub.bytes, expected);
         assert!(stub.direct_call);
-        assert_eq!(stub.bytes.len(), 115);
+        assert_eq!(stub.bytes.len(), 119);
     }
 
     #[test]
     fn x64_uses_an_indirect_call_when_out_of_range() {
         let stub = build_x64(0x2000_0000, 0x7FFF_0000_0000, 0x3000_0000, &[]);
         assert!(!stub.direct_call);
-        let xor_offset = 74;
+        let xor_offset = 78;
         assert_eq!(&stub.bytes[xor_offset..xor_offset + 2], &[0x31, 0xC0]);
         let r11_offset = xor_offset + 2;
         assert_eq!(&stub.bytes[r11_offset..r11_offset + 2], &[0x49, 0xBB]);
@@ -276,16 +283,16 @@ mod tests {
     fn x64_missing_arguments_are_zero() {
         let stub = build_x64(0x2000_0000, 0x2000_1000, 0x3000_0000, &[7]);
         // rdx is argument 2 and must be zero.
-        assert_eq!(&stub.bytes[14..24], &[0x48, 0xBA, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&stub.bytes[18..28], &[0x48, 0xBA, 0, 0, 0, 0, 0, 0, 0, 0]);
         // r9 is argument 4 and must be zero.
-        assert_eq!(&stub.bytes[34..44], &[0x49, 0xB9, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&stub.bytes[38..48], &[0x49, 0xB9, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn x64_result_addresses_are_patched() {
         let stub = build_x64(0x2000_0000, 0x2000_1000, 0xDEAD_B000, &[]);
         let bytes = &stub.bytes;
-        let result_store = 4 + 40 + 30 + 5 + 2;
+        let result_store = 4 + 4 + 40 + 30 + 5 + 2;
         assert_eq!(&bytes[result_store..result_store + 2], &[0x48, 0xA3]);
         assert_eq!(
             &bytes[result_store + 2..result_store + 10],
@@ -310,6 +317,8 @@ mod tests {
         let layout = x86_layout(X86Abi::Cdecl, &[1, 2, 3, 4, 5, 6]);
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let expected: &[u8] = &[
+            // endbr32
+            0xF3, 0x0F, 0x1E, 0xFB, //
             // push ebp; mov ebp, esp; and esp, -16; sub esp, 32
             0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x20, //
             // six stack dwords at [esp+0..20]
@@ -319,8 +328,8 @@ mod tests {
             0xC7, 0x44, 0x24, 0x0C, 4, 0, 0, 0, //
             0xC7, 0x44, 0x24, 0x10, 5, 0, 0, 0, //
             0xC7, 0x44, 0x24, 0x14, 6, 0, 0, 0, //
-            // call rel32: 0x401000 - 0x40003E = 0xFC2
-            0xE8, 0xC2, 0x0F, 0x00, 0x00, //
+            // call rel32: 0x401000 - (0x400000 + 0x3D + 5) = 0xFBE
+            0xE8, 0xBE, 0x0F, 0x00, 0x00, //
             // mov [0x0050_0000], eax ; mov [0x0050_0004], edx
             0xA3, 0x00, 0x00, 0x50, 0x00, //
             0x89, 0x15, 0x04, 0x00, 0x50, 0x00, //
@@ -331,7 +340,7 @@ mod tests {
         ];
         assert_eq!(stub.bytes, expected);
         assert!(stub.direct_call);
-        assert_eq!(stub.bytes.len(), 91);
+        assert_eq!(stub.bytes.len(), 95);
     }
 
     #[test]
@@ -340,13 +349,13 @@ mod tests {
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
         // Two stack arguments (1, 2), reservation of 16.
-        assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
-        assert_eq!(&bytes[9..17], &[0xC7, 0x44, 0x24, 0x00, 1, 0, 0, 0]);
-        assert_eq!(&bytes[17..25], &[0xC7, 0x44, 0x24, 0x04, 2, 0, 0, 0]);
+        assert_eq!(&bytes[10..13], &[0x83, 0xEC, 0x10]);
+        assert_eq!(&bytes[13..21], &[0xC7, 0x44, 0x24, 0x00, 1, 0, 0, 0]);
+        assert_eq!(&bytes[21..29], &[0xC7, 0x44, 0x24, 0x04, 2, 0, 0, 0]);
         // mov ecx, 0xAA
-        assert_eq!(&bytes[25..30], &[0xB9, 0xAA, 0, 0, 0]);
+        assert_eq!(&bytes[29..34], &[0xB9, 0xAA, 0, 0, 0]);
         // Only the two stack arguments: `this` is not stored on the stack.
-        assert!(bytes[9..25].iter().all(|&byte| byte != 0xAA));
+        assert!(bytes[13..29].iter().all(|&byte| byte != 0xAA));
     }
 
     #[test]
@@ -354,12 +363,12 @@ mod tests {
         let layout = x86_layout(X86Abi::Fastcall, &[0x11, 0x22, 0x33]);
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
-        assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
+        assert_eq!(&bytes[10..13], &[0x83, 0xEC, 0x10]);
         // Only argument 3 is on the stack.
-        assert_eq!(&bytes[9..17], &[0xC7, 0x44, 0x24, 0x00, 0x33, 0, 0, 0]);
+        assert_eq!(&bytes[13..21], &[0xC7, 0x44, 0x24, 0x00, 0x33, 0, 0, 0]);
         // mov ecx, 0x11 ; mov edx, 0x22
-        assert_eq!(&bytes[17..22], &[0xB9, 0x11, 0, 0, 0]);
-        assert_eq!(&bytes[22..27], &[0xBA, 0x22, 0, 0, 0]);
+        assert_eq!(&bytes[21..26], &[0xB9, 0x11, 0, 0, 0]);
+        assert_eq!(&bytes[26..31], &[0xBA, 0x22, 0, 0, 0]);
     }
 
     #[test]
@@ -368,13 +377,13 @@ mod tests {
         assert_eq!(layout.stack, vec![3, 1, 2]);
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
-        assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
-        assert_eq!(&bytes[9..13], &[0xC7, 0x44, 0x24, 0x00]);
-        assert_eq!(&bytes[13..17], &3u32.to_le_bytes());
-        assert_eq!(&bytes[17..21], &[0xC7, 0x44, 0x24, 0x04]);
-        assert_eq!(&bytes[21..25], &1u32.to_le_bytes());
-        assert_eq!(&bytes[25..29], &[0xC7, 0x44, 0x24, 0x08]);
-        assert_eq!(&bytes[29..33], &2u32.to_le_bytes());
+        assert_eq!(&bytes[10..13], &[0x83, 0xEC, 0x10]);
+        assert_eq!(&bytes[13..17], &[0xC7, 0x44, 0x24, 0x00]);
+        assert_eq!(&bytes[17..21], &3u32.to_le_bytes());
+        assert_eq!(&bytes[21..25], &[0xC7, 0x44, 0x24, 0x04]);
+        assert_eq!(&bytes[25..29], &1u32.to_le_bytes());
+        assert_eq!(&bytes[29..33], &[0xC7, 0x44, 0x24, 0x08]);
+        assert_eq!(&bytes[33..37], &2u32.to_le_bytes());
     }
 
     #[test]
@@ -382,9 +391,9 @@ mod tests {
         let layout = x86_layout(X86Abi::Stdcall, &[7, 8]);
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         let bytes = &stub.bytes;
-        assert_eq!(&bytes[6..9], &[0x83, 0xEC, 0x10]);
-        assert_eq!(&bytes[9..17], &[0xC7, 0x44, 0x24, 0x00, 7, 0, 0, 0]);
-        assert_eq!(&bytes[17..25], &[0xC7, 0x44, 0x24, 0x04, 8, 0, 0, 0]);
+        assert_eq!(&bytes[10..13], &[0x83, 0xEC, 0x10]);
+        assert_eq!(&bytes[13..21], &[0xC7, 0x44, 0x24, 0x00, 7, 0, 0, 0]);
+        assert_eq!(&bytes[21..29], &[0xC7, 0x44, 0x24, 0x04, 8, 0, 0, 0]);
         // The stub restores ESP itself, so callee stack cleanup is harmless.
         assert_eq!(&bytes[bytes.len() - 2..], &[0x04, 0x00]);
     }
@@ -394,8 +403,10 @@ mod tests {
         let layout = x86_layout(X86Abi::Cdecl, &[]);
         let stub = build_x86(0x0040_0000, 0x0040_1000, 0x0050_0000, &layout);
         assert_eq!(
-            &stub.bytes[..9],
-            &[0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0, 0xE8, 0xF5, 0x0F]
+            &stub.bytes[..13],
+            &[
+                0xF3, 0x0F, 0x1E, 0xFB, 0x55, 0x89, 0xE5, 0x83, 0xE4, 0xF0, 0xE8, 0xF1, 0x0F
+            ]
         );
     }
 
@@ -404,8 +415,8 @@ mod tests {
         let layout = x86_layout(X86Abi::Cdecl, &[1]);
         let stub = build_x86(0x0040_0000, 0xF000_0000, 0x0050_0000, &layout);
         assert!(!stub.direct_call);
-        // 6-byte prefix, 3-byte reservation, 8-byte argument store.
-        let call = &stub.bytes[17..];
+        // 10-byte prefix, 3-byte reservation, 8-byte argument store.
+        let call = &stub.bytes[21..];
         assert_eq!(&call[..7], &[0xB8, 0x00, 0x00, 0x00, 0xF0, 0xFF, 0xD0]);
     }
 }

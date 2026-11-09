@@ -255,9 +255,11 @@ fn find_pe_process(tag: &str, parent: u32, launcher: u32, timeout: Duration) -> 
             let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
                 continue;
             };
+            // `stat` is `pid (comm) state ppid ...`; `comm` can contain
+            // spaces and parentheses, so split after the last ')'.
             let ppid = stat
-                .split_whitespace()
-                .nth(3)
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
                 .and_then(|value| value.parse::<u32>().ok());
             if ppid == Some(parent) || ppid == Some(launcher) {
                 return Some(pid);

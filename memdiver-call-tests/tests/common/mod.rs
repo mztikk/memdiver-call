@@ -28,8 +28,6 @@ pub(crate) struct Fixture {
     pub(crate) exit_thread: u64,
     /// Address of the fixture's scratch buffer.
     pub(crate) buffer: u64,
-    /// Address of the fixture's data export.
-    pub(crate) data: u64,
     /// File name of the fixture module, for `call_export`.
     pub(crate) module: String,
     /// Address of `fixture_stdcall_add` (Windows `x86` only).
@@ -116,7 +114,6 @@ impl Fixture {
             #[cfg(windows)]
             exit_thread: number("exit_thread"),
             buffer: number("buffer"),
-            data: number("data"),
             module,
             #[cfg(all(windows, target_arch = "x86"))]
             stdcall: number("stdcall"),

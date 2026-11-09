@@ -22,12 +22,11 @@ pub(crate) fn layout(saved_esp: u64, stack_arguments: usize) -> Option<FrameLayo
     let top = saved_esp.checked_sub(4)?.checked_sub(stack_bytes)?;
     let frame = (top & !0xF).checked_sub(4)?;
     let end = frame.checked_add(4)?.checked_add(stack_bytes)?;
-    if end > saved_esp {
-        return None;
-    }
-    if frame % 16 != 12 {
-        return None;
-    }
+    debug_assert!(
+        end <= saved_esp,
+        "frame must stay below the interrupted ESP"
+    );
+    debug_assert_eq!(frame % 16, 12, "the callee needs ESP % 16 == 12 at entry");
     Some(FrameLayout { frame, end })
 }
 

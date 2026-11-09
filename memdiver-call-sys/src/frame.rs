@@ -40,13 +40,11 @@ pub(crate) fn layout(saved_rsp: u64, argument_count: usize) -> Option<FrameLayou
     let frame = aligned.checked_sub(8)?;
     let end = frame.checked_add(8)?.checked_add(stack_bytes)?;
 
-    // The frame must end at or below the red zone.
-    if end > saved_rsp.checked_sub(RED_ZONE)? {
-        return None;
-    }
-    if frame % 16 != 8 {
-        return None;
-    }
+    debug_assert!(
+        end <= saved_rsp - RED_ZONE,
+        "frame must stay below the red zone"
+    );
+    debug_assert_eq!(frame % 16, 8, "the callee needs RSP % 16 == 8 at entry");
     Some(FrameLayout { frame, end })
 }
 
