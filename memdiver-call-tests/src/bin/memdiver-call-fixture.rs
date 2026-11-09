@@ -218,6 +218,15 @@ fn main() {
     println!("{ready}");
     io::stdout().flush().expect("flush READY");
 
+    if std::env::var_os("MEMDIVER_CALL_FIXTURE_SPIN_ADD").is_some() {
+        // Tight loop around one deterministic function: the native regression
+        // test for the `function == saved.rip` guard needs the thread to be
+        // interrupted at that function's entry.
+        loop {
+            std::hint::black_box(fixture_add(2, 3));
+        }
+    }
+
     if std::env::var_os("MEMDIVER_CALL_FIXTURE_SPIN").is_some() {
         loop {
             std::hint::black_box(fixture_tick());

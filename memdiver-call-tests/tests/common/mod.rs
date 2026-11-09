@@ -53,15 +53,30 @@ pub(crate) struct Fixture {
 impl Fixture {
     /// Spawns the fixture and waits for its `READY` line.
     pub(crate) fn spawn() -> Self {
+        Self::spawn_with_env(&[])
+    }
+
+    /// Spawns the fixture spinning on `fixture_add(2, 3)` only.
+    pub(crate) fn spawn_spinning_add() -> Self {
+        Self::spawn_with_env(&[("MEMDIVER_CALL_FIXTURE_SPIN_ADD", "1")])
+    }
+
+    /// Spawns the fixture with additional environment variables.
+    fn spawn_with_env(envs: &[(&str, &str)]) -> Self {
         let path = fixture_path();
         let module = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut child = Command::new(&path)
+        let mut command = Command::new(&path);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let mut child = command
             .spawn()
             .unwrap_or_else(|error| panic!("failed to spawn {}: {error}", path.display()));
         let stdin = child.stdin.take().expect("fixture stdin");

@@ -289,6 +289,23 @@ fn thread_option_accepts_only_the_main_thread() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn calling_the_running_function_returns_its_result() {
+    // The fixture spins on `fixture_add(2, 3)`. Calling the same address with
+    // (40, 2) must return 42 even when the interrupted RIP is inside the
+    // function: the return breakpoint then fires early while the callee
+    // executes that instruction, and the resume-flag path must step over it.
+    let fixture = Fixture::spawn_spinning_add();
+    let caller = open(&fixture);
+    for _ in 0..1000 {
+        match caller.call(Address::new(fixture.add), &[40, 2], &CallOptions::new()) {
+            Ok(42) => {}
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn call_after_target_exit_reports_target_exited() {
     let fixture = Fixture::spawn();
     let caller = open(&fixture);

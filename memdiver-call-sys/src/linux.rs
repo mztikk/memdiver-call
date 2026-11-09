@@ -36,11 +36,27 @@ const NT_PRFPREG: u32 = 2;
 /// This is `TRAP_HWBKPT` from `asm/trap_pf.h`; `libc` does not export it.
 const TRAP_HWBKPT: i32 = 4;
 
+/// `status >> 16` value for a `PTRACE_EVENT_STOP` stop.
+///
+/// `libc` exposes this for some targets but not for `linux-gnu`.
+const PTRACE_EVENT_STOP: libc::c_int = 128;
+
 /// Direction flag: the ABI requires `DF = 0` at function entry.
 const EFLAGS_DF: u64 = 1 << 10;
 
 /// Trap flag: a called function must not single-step the target.
 const EFLAGS_TF: u64 = 1 << 8;
+
+/// Resume flag: suppresses the instruction breakpoint for one instruction.
+///
+/// When the interrupted instruction lies inside the called function, the
+/// return breakpoint also fires while the callee executes that instruction.
+/// Setting `RF` lets that instruction run once so the breakpoint can fire
+/// again at the real return.
+const EFLAGS_RF: u64 = 1 << 16;
+
+/// Upper bound on early return-breakpoint hits before the call is failed.
+const MAX_EARLY_BREAKPOINT_STOPS: usize = 4096;
 
 /// Upper bound on forwarded signal stops before a call is declared failed.
 ///
@@ -255,7 +271,15 @@ fn run(tid: libc::pid_t, process: &Process, function: u64, args: &[u64]) -> Call
     };
 
     let result = execute(tid, process, function, args, &saved_registers, &saved_debug);
-    let cleanup = restore_and_detach(tid, &saved_registers, &saved_fp, &saved_debug).err();
+    let deliver = deliver_on_detach(&result);
+    let cleanup = restore_and_detach(
+        tid,
+        &saved_registers,
+        Some(&saved_fp),
+        &saved_debug,
+        deliver,
+    )
+    .err();
     CallOutcome { result, cleanup }
 }
 
@@ -282,7 +306,6 @@ fn execute(
         saved.rip,
         "the interrupted instruction pointer is not in an executable region",
     )?;
-
     let layout = frame::layout(saved.rsp, args.len()).ok_or(SysError::InvalidAddress {
         address: saved.rsp,
         reason: "the stack pointer is too low for a call frame",
@@ -345,12 +368,16 @@ fn execute(
     set_registers(tid, &registers)?;
 
     resume(tid, 0)?;
-    wait_for_breakpoint(tid, saved.rip, slot)?;
+    // A real return has popped the synthetic return address, so RSP is above
+    // the frame; that is how it is told apart from the callee executing the
+    // interrupted instruction itself.
+    wait_for_breakpoint(tid, saved.rip, slot, layout.frame)?;
     Ok(get_registers(tid)?.rax)
 }
 
 /// Waits for the initial `PTRACE_INTERRUPT` stop.
 pub(crate) fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
+    let mut forwarded = 0usize;
     loop {
         let mut status: libc::c_int = 0;
         // SAFETY: `status` is a valid, writable `c_int`; `tid` is the traced
@@ -364,7 +391,28 @@ pub(crate) fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
             return Err(platform("waitpid", &error));
         }
         if libc::WIFSTOPPED(status) {
-            return Ok(());
+            if is_event_stop(status) {
+                // `PTRACE_INTERRUPT` reports an event stop with `SIGTRAP`. Any
+                // other event stop is a job-control group-stop, which must not
+                // be treated as the attach stop.
+                if libc::WSTOPSIG(status) == libc::SIGTRAP {
+                    return Ok(());
+                }
+                return Err(SysError::Unsupported {
+                    operation: "attach",
+                    reason: "the target is stopped by job control",
+                });
+            }
+            // A signal-delivery stop can win the race with PTRACE_INTERRUPT.
+            // Forward it instead of dropping it, then keep waiting for the
+            // interrupt event stop.
+            let signal = libc::WSTOPSIG(status);
+            forwarded = forwarded.saturating_add(1);
+            if forwarded > MAX_SIGNAL_STOPS {
+                return Err(SysError::CallFailed(CallStatus::Signal(signal)));
+            }
+            resume(tid, signal)?;
+            continue;
         }
         if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
             return Err(SysError::TargetExited);
@@ -373,12 +421,21 @@ pub(crate) fn wait_for_initial_stop(tid: libc::pid_t) -> Result<(), SysError> {
 }
 
 /// Waits for the hardware breakpoint at the interrupted instruction.
+///
+/// `frame` is the address of the synthetic return address. A real return has
+/// already popped it, so the callee's stack pointer is above `frame`; a hit at
+/// or below `frame` means the callee executed the interrupted instruction
+/// itself. That instruction is stepped over with the resume flag and the wait
+/// continues. The check is deliberately a comparison rather than an exact
+/// value so it also covers callee-cleanup x86 conventions (`ret N`).
 pub(crate) fn wait_for_breakpoint(
     tid: libc::pid_t,
     breakpoint: u64,
     slot: u8,
+    frame: u64,
 ) -> Result<(), SysError> {
     let mut forwarded = 0usize;
+    let mut early = 0usize;
     loop {
         let mut status: libc::c_int = 0;
         // SAFETY: `status` is a valid, writable `c_int`; `tid` is the traced
@@ -399,9 +456,27 @@ pub(crate) fn wait_for_breakpoint(
         }
         let signal = libc::WSTOPSIG(status);
         if signal == libc::SIGTRAP && is_breakpoint_hit(tid, breakpoint, slot) {
-            return Ok(());
+            let registers = get_registers(tid)?;
+            if registers.rsp > frame {
+                return Ok(());
+            }
+            early = early.saturating_add(1);
+            if early > MAX_EARLY_BREAKPOINT_STOPS {
+                return Err(SysError::CallFailed(CallStatus::Signal(signal)));
+            }
+            let mut stepped = registers;
+            stepped.eflags |= EFLAGS_RF;
+            set_registers(tid, &stepped)?;
+            resume(tid, 0)?;
+            continue;
         }
-        // Forward non-breakpoint signals to the target. A signal that repeats
+        if is_event_stop(status) {
+            // A group-stop (or an interrupt from another tracer) is not a
+            // signal-delivery stop; forwarding it would either re-stop the
+            // tracee or inject a real SIGTRAP. Abort so the restore path runs.
+            return Err(SysError::CallFailed(CallStatus::Signal(signal)));
+        }
+        // Forward signal-delivery stops to the target. A signal that repeats
         // forever must not hang the caller.
         forwarded = forwarded.saturating_add(1);
         if forwarded > MAX_SIGNAL_STOPS {
@@ -441,14 +516,17 @@ pub(crate) fn is_breakpoint_hit(tid: libc::pid_t, breakpoint: u64, slot: u8) -> 
 pub(crate) fn restore_and_detach(
     tid: libc::pid_t,
     registers: &libc::user_regs_struct,
-    fp: &FpState,
+    fp: Option<&FpState>,
     debug_state: &DebugState,
+    deliver: libc::c_int,
 ) -> Result<(), SysError> {
     let mut failures = Failures::default();
     failures.record(ignore_exited(restore_debug_state(tid, debug_state)));
-    failures.record(ignore_exited(set_fp_state(tid, fp)));
+    if let Some(fp) = fp {
+        failures.record(ignore_exited(set_fp_state(tid, fp)));
+    }
     failures.record(ignore_exited(set_registers(tid, registers)));
-    failures.record(detach(tid));
+    failures.record(detach_with_signal(tid, deliver));
     failures.into_result()
 }
 
@@ -485,9 +563,41 @@ pub(crate) fn restore_debug_state(tid: libc::pid_t, saved: &DebugState) -> Resul
 
 /// Detaches the tracee with signal 0.
 pub(crate) fn detach(tid: libc::pid_t) -> Result<(), SysError> {
-    match ptrace_raw(libc::PTRACE_DETACH, tid, 0, 0, "PTRACE_DETACH") {
+    detach_with_signal(tid, 0)
+}
+
+/// Detaches the tracee, delivering `signal` if it is non-zero.
+///
+/// `PTRACE_DETACH` returns `ESRCH` both when the tracee is gone and when it is
+/// not stopped. The two cases are distinguished here so a target that is still
+/// running is reported instead of being treated as detached.
+pub(crate) fn detach_with_signal(tid: libc::pid_t, signal: libc::c_int) -> Result<(), SysError> {
+    let data = usize::try_from(signal).unwrap_or(0);
+    let detach = || ptrace_raw(libc::PTRACE_DETACH, tid, 0, data, "PTRACE_DETACH");
+    match detach() {
         Ok(_) => Ok(()),
-        Err(error) if is_esrch(&error) => Ok(()),
+        Err(error) if is_esrch(&error) => {
+            let mut status: libc::c_int = 0;
+            // SAFETY: `status` is writable and `tid` is the traced thread.
+            let reaped = unsafe { libc::waitpid(tid, &mut status, libc::__WALL | libc::WNOHANG) };
+            if reaped == tid {
+                if !libc::WIFSTOPPED(status) {
+                    return Ok(());
+                }
+                // A stop was pending after all; retry the detach once.
+                match detach() {
+                    Ok(_) => Ok(()),
+                    Err(retry) if is_esrch(&retry) => Err(retry),
+                    Err(retry) => Err(retry),
+                }
+            } else if reaped < 0 {
+                // ECHILD: the tracee is no longer our child.
+                Ok(())
+            } else {
+                // The task exists but is running, so it was not detached.
+                Err(error)
+            }
+        }
         Err(error) => Err(error),
     }
 }
@@ -855,6 +965,35 @@ pub(crate) fn inspect(operation: &'static str) -> impl FnOnce(memdiver::Error) -
         operation,
         source: Box::new(source),
     }
+}
+
+/// Returns the stop signal to deliver when detaching after a failed call.
+///
+/// Only a genuine signal-delivery stop carries a signal worth forwarding:
+/// `SIGTRAP` is either our own breakpoint or a trap event, and job-control
+/// signals must not be re-delivered.
+fn deliver_on_detach(result: &Result<u64, SysError>) -> libc::c_int {
+    match result {
+        Err(SysError::CallFailed(CallStatus::Signal(signal)))
+            if *signal != libc::SIGTRAP && !is_group_stop_signal(*signal) =>
+        {
+            *signal
+        }
+        _ => 0,
+    }
+}
+
+/// Returns `true` when `status` reports a `PTRACE_EVENT_STOP`.
+pub(crate) fn is_event_stop(status: libc::c_int) -> bool {
+    (status >> 16) == PTRACE_EVENT_STOP
+}
+
+/// Returns `true` for the job-control signals that arrive as group-stops.
+fn is_group_stop_signal(signal: libc::c_int) -> bool {
+    signal == libc::SIGSTOP
+        || signal == libc::SIGTSTP
+        || signal == libc::SIGTTIN
+        || signal == libc::SIGTTOU
 }
 
 /// Builds a platform error from an `io::Error`.

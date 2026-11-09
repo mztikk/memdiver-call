@@ -583,7 +583,7 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
     if let Err(error) = linux::resume(tid, 0) {
         return fail_state(tid, &base, &fp, &debug, error);
     }
-    if let Err(error) = linux::wait_for_breakpoint(tid, base.rip, slot) {
+    if let Err(error) = linux::wait_for_breakpoint(tid, base.rip, slot, frame.frame) {
         return fail_state(tid, &base, &fp, &debug, error);
     }
     let hit = match linux::get_registers(tid) {
@@ -604,7 +604,7 @@ fn run(tid: libc::pid_t, process: &Process, spec: &CallSpec<'_>) -> CallOutcome 
     }
 
     let result = (u64::from(hit.rdx as u32) << 32) | u64::from(hit.rax as u32);
-    let cleanup = linux::restore_and_detach(tid, &base, &fp, &debug).err();
+    let cleanup = linux::restore_and_detach(tid, &base, Some(&fp), &debug, 0).err();
     CallOutcome {
         result: Ok(result),
         cleanup,
@@ -627,16 +627,22 @@ fn wait_for_safe_point(
     slot: u8,
     timeout: Duration,
 ) -> Result<SafePoint, SysError> {
+    const MAX_SAFE_POINT_STOPS: usize = 1024;
     let deadline = Instant::now().checked_add(timeout);
+    let mut stops = 0usize;
     loop {
+        // The deadline must be checked on every iteration: a tracee that keeps
+        // stopping (for example a job-control group-stop that is resumed each
+        // time) never lets `poll` return 0, so checking only there would let
+        // the documented timeout expire silently.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            interrupt_and_stop(tid)?;
+            return Ok(SafePoint::TimedOut);
+        }
         match poll(tid, deadline)? {
             Poll::Exited => return Err(SysError::CallFailed(CallStatus::Exited)),
             Poll::TimedOut => {
-                // The tracee may have stopped between the poll and this
-                // interrupt, so an interrupt error is not fatal; wait for the
-                // pending stop instead.
-                let _ = linux::ptrace_raw(libc::PTRACE_INTERRUPT, tid, 0, 0, "PTRACE_INTERRUPT");
-                linux::wait_for_initial_stop(tid)?;
+                interrupt_and_stop(tid)?;
                 return Ok(SafePoint::TimedOut);
             }
             Poll::Stopped(status) => {
@@ -651,12 +657,16 @@ fn wait_for_safe_point(
                         reason: "the safe point was hit outside 32-bit mode",
                     });
                 }
-                let deliver = if linux::get_siginfo(tid).is_ok() {
-                    signal
-                } else {
-                    0
-                };
-                linux::resume(tid, deliver)?;
+                if linux::is_event_stop(status) {
+                    // A group-stop or another event stop; the thread will not
+                    // reach the safe point until something external resumes it.
+                    return Err(SysError::CallFailed(CallStatus::Signal(signal)));
+                }
+                stops = stops.saturating_add(1);
+                if stops > MAX_SAFE_POINT_STOPS {
+                    return Err(SysError::CallFailed(CallStatus::Signal(signal)));
+                }
+                linux::resume(tid, signal)?;
             }
         }
     }
@@ -738,16 +748,15 @@ fn fail_armed(tid: libc::pid_t, debug: &DebugState, error: SysError) -> CallOutc
 /// The tracee may be stopped or still running; both cases are handled so the
 /// armed debug registers are not left behind.
 fn fail_after_wait(tid: libc::pid_t, debug: &DebugState, error: SysError) -> CallOutcome {
+    // If the tracee is already stopped, restore and detach without sending
+    // PTRACE_INTERRUPT: on a stopped tracee the interrupt trap is only
+    // reported after a resume, so blocking on it would hang.
     if let Ok(registers) = linux::get_registers(tid) {
-        if let Ok(fp) = linux::get_fp_state(tid) {
-            return fail_state(tid, &registers, &fp, debug, error);
-        }
+        return fail_state_without_fp(tid, &registers, debug, error);
     }
     if interrupt_and_stop(tid).is_ok() {
         if let Ok(registers) = linux::get_registers(tid) {
-            if let Ok(fp) = linux::get_fp_state(tid) {
-                return fail_state(tid, &registers, &fp, debug, error);
-            }
+            return fail_state_without_fp(tid, &registers, debug, error);
         }
     }
     let _ = linux::restore_debug_state(tid, debug);
@@ -757,10 +766,56 @@ fn fail_after_wait(tid: libc::pid_t, debug: &DebugState, error: SysError) -> Cal
     }
 }
 
-/// Interrupts a running tracee and waits for the stop.
+/// Interrupts a running tracee and waits for the stop, bounded by a grace
+/// period so an uninterruptible target cannot hang cleanup forever.
 fn interrupt_and_stop(tid: libc::pid_t) -> Result<(), SysError> {
+    const STOP_GRACE: Duration = Duration::from_millis(500);
+
+    let mut status: libc::c_int = 0;
+    // SAFETY: `status` is writable and `tid` is the traced thread.
+    let reaped = unsafe { libc::waitpid(tid, &mut status, libc::__WALL | libc::WNOHANG) };
+    if reaped == tid {
+        return stop_outcome(status);
+    }
+    if reaped < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(linux::platform("waitpid", &error));
+        }
+    }
+
     let _ = linux::ptrace_raw(libc::PTRACE_INTERRUPT, tid, 0, 0, "PTRACE_INTERRUPT");
-    linux::wait_for_initial_stop(tid)
+    let deadline = Instant::now().checked_add(STOP_GRACE);
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `status` is writable and `tid` is the traced thread.
+        let reaped = unsafe { libc::waitpid(tid, &mut status, libc::__WALL | libc::WNOHANG) };
+        if reaped == tid {
+            return stop_outcome(status);
+        }
+        if reaped < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(linux::platform("waitpid", &error));
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(SysError::Unsupported {
+                operation: "remote call",
+                reason: "the target did not stop for cleanup",
+            });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Converts a reaped stop into the cleanup expectation.
+fn stop_outcome(status: libc::c_int) -> Result<(), SysError> {
+    if libc::WIFSTOPPED(status) {
+        Ok(())
+    } else {
+        Err(SysError::TargetExited)
+    }
 }
 
 /// Restores the selected stop state and detaches, keeping the failure.
@@ -771,7 +826,24 @@ fn fail_state(
     debug: &DebugState,
     error: SysError,
 ) -> CallOutcome {
-    let cleanup = linux::restore_and_detach(tid, base, fp, debug).err();
+    let cleanup = linux::restore_and_detach(tid, base, Some(fp), debug, 0).err();
+    CallOutcome {
+        result: Err(error),
+        cleanup,
+    }
+}
+
+/// Stops with a stopped tracee whose floating-point state could not be read.
+///
+/// The thread already ran, so its current FP state is its own; there is
+/// nothing of ours to restore for it.
+fn fail_state_without_fp(
+    tid: libc::pid_t,
+    base: &libc::user_regs_struct,
+    debug: &DebugState,
+    error: SysError,
+) -> CallOutcome {
+    let cleanup = linux::restore_and_detach(tid, base, None, debug, 0).err();
     CallOutcome {
         result: Err(error),
         cleanup,
